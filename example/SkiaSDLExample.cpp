@@ -168,6 +168,10 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    dm.w = std::min(dm.w, 800);
+    dm.h = std::min(dm.h, 640);
+    SkDebugf("dm: dw %d dh %d\n", dm.w, dm.h);
+
     SDL_Window* window = SDL_CreateWindow("SDL Window", SDL_WINDOWPOS_CENTERED,
                                           SDL_WINDOWPOS_CENTERED, dm.w, dm.h, windowFlags);
 

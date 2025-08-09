@@ -3249,6 +3249,21 @@ if (skia_enable_tools) {
     }
   }
 
+  if (skia_use_gl && (is_win || is_linux || is_mac || is_ios || is_android)) {
+    test_app("SkiaTerminal") {
+      sources = [
+        "terminal/SkiaTerminal.cpp",
+      ]
+      libs = []
+      deps = [
+        ":gpu_tool_utils",
+        ":skia",
+        "//third_party/libsdl",
+        "//third_party/libtsm",
+      ]
+    }
+  }
+
   if (skia_use_vulkan) {
     test_app("VulkanBasic") {
       # Bots and even devs may not have Vulkan headers, so put
