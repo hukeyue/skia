@@ -1,0 +1,36 @@
+# Copyright 2016 Google Inc.
+#
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+declare_args() {
+}
+
+import("../third_party.gni")
+
+third_party("libtsm") {
+  public_include_dirs = [ "../externals/libtsm/src/tsm" ]
+
+  include_dirs = [ ".", "../externals/libtsm/src/shared", "../externals/libtsm" ]
+  sources = [
+    "../externals/libtsm/src/tsm/tsm-render.c",
+    "../externals/libtsm/src/tsm/tsm-selection.c",
+    "../externals/libtsm/src/tsm/tsm-vte-charsets.c",
+    "../externals/libtsm/src/tsm/tsm-screen.c",
+    "../externals/libtsm/src/tsm/tsm-unicode.c",
+    "../externals/libtsm/src/tsm/tsm-vte.c",
+    "../externals/libtsm/src/shared/shl-htable.c",
+    "../externals/libtsm/external/wcwidth.c",
+  ]
+  defines = []
+  libs = []
+  cflags_c = [
+    "-fno-common",
+    "-ffast-math",
+    "-fdiagnostics-show-option",
+    "-fno-strict-aliasing",
+    "-fvisibility=hidden",
+    "-ffunction-sections",
+    "-fdata-sections",
+  ]
+}
