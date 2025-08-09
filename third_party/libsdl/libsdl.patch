@@ -1,0 +1,27 @@
+From dd5aff308aa45bcd4dcf2df253c92faf084b7a9c Mon Sep 17 00:00:00 2001
+From: Ozkan Sezer <sezeroz@gmail.com>
+Date: Thu, 4 Mar 2021 18:27:56 +0300
+Subject: [PATCH] SDL_fillrect.c: updated SSE_BEGIN macro for windows clang-cl
+
+from a patchset by Vladislav Dmitrievich Turbanov:
+https://github.com/libsdl-org/SDL/pull/4062
+---
+ src/video/SDL_fillrect.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/video/SDL_fillrect.c b/src/video/SDL_fillrect.c
+index bf3199a57..6385e3ef8 100644
+--- a/src/video/SDL_fillrect.c
++++ b/src/video/SDL_fillrect.c
+@@ -28,7 +28,7 @@
+ #ifdef __SSE__
+ /* *INDENT-OFF* */
+ 
+-#ifdef _MSC_VER
++#if defined(_MSC_VER) && !defined(__clang__)
+ #define SSE_BEGIN \
+     __m128 c128; \
+     c128.m128_u32[0] = color; \
+-- 
+2.50.1
+
