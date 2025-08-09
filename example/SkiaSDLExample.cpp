@@ -12,10 +12,15 @@
 #include "include/core/SkCanvas.h"
 #include "include/core/SkFont.h"
 #include "include/core/SkSurface.h"
-#include "include/utils/SkRandom.h"
+#include "include/core/SkColorSpace.h"
 
+#include "include/gpu/ganesh/SkSurfaceGanesh.h"
+#include "include/gpu/ganesh/gl/GrGLBackendSurface.h"
+#include "include/gpu/ganesh/gl/GrGLDirectContext.h"
 #include "include/gpu/gl/GrGLInterface.h"
-#include "src/gpu/gl/GrGLUtil.h"
+#include "include/gpu/gl/GrGLTypes.h"
+#include "src/base/SkRandom.h"
+#include "src/gpu/ganesh/gl/GrGLUtil.h"
 
 #if defined(SK_BUILD_FOR_ANDROID)
 #include <GLES/gl.h>
@@ -25,7 +30,13 @@
 #include <OpenGL/gl.h>
 #elif defined(SK_BUILD_FOR_IOS)
 #include <OpenGLES/ES2/gl.h>
+#elif defined(SK_BUILD_FOR_WIN)
+#include <windows.h>
+#include <shellscalingapi.h>
+#include <GL/gl.h>
 #endif
+
+#include <vector>
 
 /*
  * This application is a simple example of how to combine SDL and Skia it demonstrates:
@@ -38,7 +49,7 @@
 struct ApplicationState {
     ApplicationState() : fQuit(false) {}
     // Storage for the user created rectangles. The last one may still be being edited.
-    SkTArray<SkRect> fRects;
+    std::vector<SkRect> fRects;
     bool fQuit;
 };
 
@@ -61,10 +72,10 @@ static void handle_events(ApplicationState* state, SkCanvas* canvas) {
                 break;
             case SDL_MOUSEBUTTONDOWN:
                 if (event.button.state == SDL_PRESSED) {
-                    state->fRects.push_back() = SkRect::MakeLTRB(SkIntToScalar(event.button.x),
-                                                                 SkIntToScalar(event.button.y),
-                                                                 SkIntToScalar(event.button.x),
-                                                                 SkIntToScalar(event.button.y));
+                    state->fRects.push_back(SkRect::MakeLTRB(SkIntToScalar(event.button.x),
+                                                             SkIntToScalar(event.button.y),
+                                                             SkIntToScalar(event.button.x),
+                                                             SkIntToScalar(event.button.y)));
                 }
                 break;
             case SDL_KEYDOWN: {
@@ -195,16 +206,23 @@ int main(int argc, char** argv) {
     glClear(GL_COLOR_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
 
     // setup GrContext
-    auto interface = GrGLMakeNativeInterface();
+    auto glInterface = GrGLMakeNativeInterface();
+    if (!glInterface.get()) {
+        SkDebugf("GrGLMakeNativeInterface Error\n");
+        return -1;
+    }
 
     // setup contexts
-    sk_sp<GrDirectContext> grContext(GrDirectContext::MakeGL(interface));
-    SkASSERT(grContext);
+    sk_sp<GrDirectContext> grContext = GrDirectContexts::MakeGL(glInterface, GrContextOptions());
+    if (!grContext.get()) {
+        SkDebugf("GrDirectContexts::MakeGL Error\n");
+        return -1;
+    }
 
     // Wrap the frame buffer object attached to the screen in a Skia render target so Skia can
     // render to it
     GrGLint buffer;
-    GR_GL_GetIntegerv(interface.get(), GR_GL_FRAMEBUFFER_BINDING, &buffer);
+    GR_GL_GetIntegerv(glInterface.get(), GR_GL_FRAMEBUFFER_BINDING, &buffer);
     GrGLFramebufferInfo info;
     info.fFBOID = (GrGLuint) buffer;
     SkColorType colorType;
@@ -224,7 +242,7 @@ int main(int argc, char** argv) {
         }
     }
 
-    GrBackendRenderTarget target(dw, dh, kMsaaSampleCount, kStencilBits, info);
+    auto target = GrBackendRenderTargets::MakeGL(dw, dh, kMsaaSampleCount, kStencilBits, info);
 
     // setup SkSurface
     // To use distance field text, use commented out SkSurfaceProps instead
@@ -232,9 +250,9 @@ int main(int argc, char** argv) {
     //                      SkSurfaceProps::kUnknown_SkPixelGeometry);
     SkSurfaceProps props;
 
-    sk_sp<SkSurface> surface(SkSurface::MakeFromBackendRenderTarget(grContext.get(), target,
-                                                                    kBottomLeft_GrSurfaceOrigin,
-                                                                    colorType, nullptr, &props));
+    sk_sp<SkSurface> surface(SkSurfaces::WrapBackendRenderTarget(grContext.get(), target,
+                                                                 kBottomLeft_GrSurfaceOrigin,
+                                                                 colorType, nullptr, &props));
 
     SkCanvas* canvas = surface->getCanvas();
     canvas->scale((float)dw/dm.w, (float)dh/dm.h);
@@ -246,7 +264,7 @@ int main(int argc, char** argv) {
     SkPaint paint;
 
     // create a surface for CPU rasterization
-    sk_sp<SkSurface> cpuSurface(SkSurface::MakeRaster(canvas->imageInfo()));
+    sk_sp<SkSurface> cpuSurface(SkSurfaces::Raster(canvas->imageInfo()));
 
     SkCanvas* offscreen = cpuSurface->getCanvas();
     offscreen->save();
@@ -265,7 +283,7 @@ int main(int argc, char** argv) {
 
         paint.setColor(SK_ColorBLACK);
         canvas->drawString(helpMessage, 100.0f, 100.0f, font, paint);
-        for (int i = 0; i < state.fRects.count(); i++) {
+        for (unsigned int i = 0; i < state.fRects.size(); i++) {
             paint.setColor(rand.nextU() | 0x44808080);
             canvas->drawRect(state.fRects[i], paint);
         }
@@ -277,7 +295,9 @@ int main(int argc, char** argv) {
         canvas->drawImage(image, -50.0f, -50.0f);
         canvas->restore();
 
-        canvas->flush();
+        auto dContext = GrAsDirectContext(canvas->recordingContext());
+        dContext->flushAndSubmit();
+
         SDL_GL_SwapWindow(window);
     }
 
