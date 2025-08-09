@@ -81,6 +81,7 @@ deps = {
   "third_party/externals/wuffs"                  : "https://skia.googlesource.com/external/github.com/google/wuffs-mirror-release-c.git@e3f919ccfe3ef542cfc983a82146070258fb57f8",
   "third_party/externals/zlib"                   : "https://chromium.googlesource.com/chromium/src/third_party/zlib@646b7f569718921d7d4b5b8e22572ff6c76f2596",
   "third_party/externals/libtsm"                 : "git://people.freedesktop.org/~dvdhrm/libtsm@b73acb4c71698a764763ae8dad94c1e8a2b8d7a3",
+  "third_party/externals/sdl"                    : "https://skia.googlesource.com/third_party/sdl@5d7cfcca344034aff9327f77fc181ae3754e7a90",
 
   'bin': {
     'packages': [
