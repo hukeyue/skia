@@ -11,15 +11,16 @@
 #include "include/core/SkColorSpace.h"
 #include "include/core/SkFont.h"
 #include "include/core/SkSurface.h"
-#include "include/gpu/GrBackendSurface.h"
-#include "include/gpu/GrContextOptions.h"
-#include "include/gpu/GrDirectContext.h"
+#include "include/gpu/ganesh/GrBackendSurface.h"
+#include "include/gpu/ganesh/GrDirectContext.h"
 #include "include/gpu/ganesh/SkSurfaceGanesh.h"
 #include "include/gpu/ganesh/gl/GrGLBackendSurface.h"
 #include "include/gpu/ganesh/gl/GrGLDirectContext.h"
-#include "include/gpu/gl/GrGLInterface.h"
-#include "include/gpu/gl/GrGLTypes.h"
+#include "include/gpu/ganesh/gl/GrGLInterface.h"
+#include "include/gpu/ganesh/gl/GrGLTypes.h"
 #include "src/gpu/ganesh/gl/GrGLUtil.h"
+#include "tools/ToolUtils.h"
+#include "tools/fonts/FontToolUtils.h"
 
 #if defined(SK_BUILD_FOR_ANDROID)
 #include <GLES/gl.h>
@@ -1420,14 +1421,14 @@ int main(int argc, char** argv) {
     gState->fWidthScale = gState->fHeightScale = 1.00;
 #endif
 
-    sk_sp<SkTypeface> typeface = SkTypeface::MakeFromName(DEFAULT_FONT, SkFontStyle::Normal());
+    sk_sp<SkTypeface> typeface = ToolUtils::CreatePortableTypeface(DEFAULT_FONT, SkFontStyle::Normal());
     SkFont font(typeface, state.fFontSize);
     font.setEdging(SkFont::Edging::kAntiAlias);
     // font.setHinting(SkFontHinting::kFull);
 
     gFont = &font;
 
-    sk_sp<SkTypeface> typefaceBold = SkTypeface::MakeFromName(DEFAULT_FONT, SkFontStyle::Bold());
+    sk_sp<SkTypeface> typefaceBold = ToolUtils::CreatePortableTypeface(DEFAULT_FONT, SkFontStyle::Bold());
     SkFont fontBold(typeface, state.fFontSize);
     fontBold.setEdging(SkFont::Edging::kAntiAlias);
     // fontBold.setHinting(SkFontHinting::kFull);

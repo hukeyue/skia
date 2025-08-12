@@ -3257,6 +3257,7 @@ if (skia_enable_tools) {
       libs = []
       deps = [
         ":gpu_tool_utils",
+        ":tool_utils",
         ":skia",
         "//third_party/libsdl",
         "//third_party/libtsm",
