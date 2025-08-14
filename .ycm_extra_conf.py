@@ -71,16 +71,8 @@ import ycm_core
 # directory first.
 database = None
 compilation_database_folder=os.getenv('SKIA_BUILD_DIR')
-if compilation_database_folder and os.path.exists(compilation_database_folder):
+if compilation_database_folder and os.path.exists(os.path.join(compilation_database_folder, 'compile_commands.json')):
   database = ycm_core.CompilationDatabase(compilation_database_folder)
-
-# Flags from YCM's default config.
-_default_flags = [
-    '-DUSE_CLANG_COMPLETER',
-    '-std=c++14',
-    '-x',
-    'c++',
-]
 
 _header_alternates = ('.cc', '.cpp', '.c', '.mm', '.m')
 
@@ -251,6 +243,9 @@ def ProcessIndividualFlag(flag, next_token, out_dir):
     return include_match.group(1) + path
   elif flag.startswith('-std') or flag == '-nostdinc++':
     return flag
+  elif flag.startswith('/std:'):
+    # FIXME buggy cl mode in ycm
+    return '-std=' + flag[5:]
   elif flag.startswith('-march=arm'):
     # Value armv7-a of this flag causes a parsing error with a message
     # "ClangParseError: Failed to parse the translation unit."
@@ -273,6 +268,16 @@ def ProcessIndividualFlag(flag, next_token, out_dir):
       return '--sysroot=' + abspath(sysroot_path)
   return flag
 
+def win_CommandLineToArgvW(cmd):
+  import ctypes
+  nargs = ctypes.c_int()
+  ctypes.windll.shell32.CommandLineToArgvW.restype = ctypes.POINTER(ctypes.c_wchar_p)
+  lpargs = ctypes.windll.shell32.CommandLineToArgvW(cmd, ctypes.byref(nargs))
+  args = [lpargs[i] for i in range(nargs.value)]
+  if ctypes.windll.kernel32.LocalFree(lpargs):
+      raise AssertionError
+  return args
+
 def GetClangOptionsFromCommandLine(clang_commandline, out_dir,
                                    additional_flags):
   """Extracts relevant command line options from |clang_commandline|
@@ -290,18 +295,32 @@ def GetClangOptionsFromCommandLine(clang_commandline, out_dir,
   clang_flags = [] + additional_flags
 
   # Parse flags that are important for YCM's purposes.
-  lexer = shlex.shlex(clang_commandline, posix=True)
-  lexer.whitespace_split = True
-  # Keep double quotes which are important for some -D flags used as include paths.
-  lexer.quotes = '\''
-  clang_tokens = list(lexer)
+  if sys.platform == 'win32':
+    # parse windows command line correctly
+    clang_tokens = win_CommandLineToArgvW(clang_commandline)
+  else:
+    lexer = shlex.shlex(clang_commandline, posix=True)
+    lexer.whitespace_split = True
+    # Keep double quotes which are important for some -D flags used as include paths.
+    lexer.quotes = '\''
+    clang_tokens = list(lexer)
+  previous_token = None
   for flag_index, flag in enumerate(clang_tokens):
     next_token = clang_tokens[flag_index + 1] \
         if flag_index + 1 < len(clang_tokens) \
         else None
-    processed_flag = ProcessIndividualFlag(flag, next_token, out_dir)
+    # FIXME hacky but works while '/I' doesnt work
+    if flag == '-imsvc' or flag == '/imsvc':
+      flag = '-isystem'
+    # FIXME buggy cl mode in ycm
+    # see ycmd/completers/cpp/flags.py's INCLUDE_FLAGS_WIN_STYLE
+    if previous_token == '-imsvc' or previous_token == '/imsvc':
+      processed_flag = os.path.normpath(os.path.join(out_dir, flag))
+    else:
+      processed_flag = ProcessIndividualFlag(flag, next_token, out_dir)
     if processed_flag:
       clang_flags.append(processed_flag)
+    previous_token = flag
   return clang_flags
 
 def FileCompilationCandidates(filename):
@@ -314,16 +333,7 @@ def FileCompilationCandidates(filename):
   return candidates
 
 def GetAdditionalFlags(chrome_root):
-  # Generally, everyone benefits from including Chromium's src/, because all of
-  # Chromium's includes are relative to that.
-  additional_flags = ['-I' + os.path.join(chrome_root)]
-
-  # Version of Clang used to compile Chromium can be newer then version of
-  # libclang that YCM uses for completion. So it's possible that YCM's libclang
-  # doesn't know about some used warning options, which causes compilation
-  # warnings (and errors, because of '-Werror');
-  additional_flags.append('-Wno-unknown-warning-option')
-  return additional_flags
+  return []
 
 
 
@@ -430,6 +440,13 @@ def Settings(**kwargs):
   # determine the flags again.
   should_cache_flags_for_file = bool(clang_flags)
 
-  final_flags = _default_flags + clang_flags
+  final_flags = clang_flags
+
+  # FIXME buggy cl mode in ycm
+  # if sys.platform == 'win32':
+  #   final_flags = [ 'clang-cl.exe' ] + final_flags
+  if sys.platform == 'win32':
+    if 'clang-cl.exe' in final_flags[0]:
+      final_flags = final_flags[1:]
 
   return {'flags': final_flags, 'do_cache': should_cache_flags_for_file}
