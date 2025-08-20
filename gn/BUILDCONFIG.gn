@@ -22,6 +22,7 @@ declare_args() {
   cc = "cc"
   cxx = "c++"
 
+  # FIXME no space in path is allowed in clang_win and win_sdk when building from macOS
   win_sdk = "C:/Program Files (x86)/Windows Kits/10"
   win_sdk_version = ""
 

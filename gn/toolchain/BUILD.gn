@@ -97,14 +97,18 @@ template("msvc_toolchain") {
       env_setup = "$shell set \"PATH=%PATH%;$win_vc\\Tools\\MSVC\\$win_toolchain_version\\bin\\HostX64\\x64\" && "
     }
 
-    cl_m32_flag = ""
+    cl_m32_like_flag = ""
 
     if (clang_win != "") {
       if (toolchain_target_cpu == "x86") {
         # cl.exe knows implicitly by the choice of executable that it's targeting
         # x86, but clang-cl.exe needs to be told when targeting non-host
         # platforms. (All our builders are x86-64, so x86 is always non-host.)
-        cl_m32_flag = "-m32"
+        cl_m32_like_flag = "-target i686-pc-windows-msvc"
+      } else if (toolchain_target_cpu == "x64") {
+        cl_m32_like_flag = "-target x86_64-pc-windows-msvc"
+      } else if (toolchain_target_cpu == "arm64") {
+        cl_m32_like_flag = "-target arm64-pc-windows-msvc"
       }
       if (host_os == "win") {
         cl = "\"$clang_win/bin/clang-cl.exe\""
@@ -138,7 +142,7 @@ template("msvc_toolchain") {
       pdbname = "{{target_out_dir}}/{{label_name}}_c.pdb"
 
       # Label names may have spaces so pdbname must be quoted.
-      command = "$env_setup $cc_wrapper $cl /nologo /showIncludes /FC {{defines}} {{include_dirs}} {{cflags}} $cl_m32_flag {{cflags_c}} /c {{source}} /Fo{{output}} /Fd\"$pdbname\""
+      command = "$env_setup $cc_wrapper $cl /nologo /showIncludes /FC {{defines}} {{include_dirs}} {{cflags}} $cl_m32_like_flag {{cflags_c}} /c {{source}} /Fo{{output}} /Fd\"$pdbname\""
       depsformat = "msvc"
       outputs = [
         "{{source_out_dir}}/{{target_output_name}}.{{source_name_part}}.obj",
@@ -151,7 +155,7 @@ template("msvc_toolchain") {
       pdbname = "{{target_out_dir}}/{{label_name}}_c.pdb"
 
       # Label names may have spaces so pdbname must be quoted.
-      command = "$env_setup $cc_wrapper $cl /nologo /showIncludes /FC {{defines}} {{include_dirs}} {{cflags}} $cl_m32_flag {{cflags_cc}} /c {{source}} /Fo{{output}} /Fd\"$pdbname\""
+      command = "$env_setup $cc_wrapper $cl /nologo /showIncludes /FC {{defines}} {{include_dirs}} {{cflags}} $cl_m32_like_flag {{cflags_cc}} /c {{source}} /Fo{{output}} /Fd\"$pdbname\""
       depsformat = "msvc"
       outputs = [
         "{{source_out_dir}}/{{target_output_name}}.{{source_name_part}}.obj",
