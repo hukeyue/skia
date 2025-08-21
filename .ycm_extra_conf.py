@@ -70,7 +70,7 @@ import ycm_core
 # first attempt to find compilation flags in the compile-commands.json file in that
 # directory first.
 database = None
-compilation_database_folder=os.getenv('SKIA_BUILD_DIR')
+compilation_database_folder=os.getenv('SKIA_NEXT_BUILD_DIR')
 if compilation_database_folder and os.path.exists(os.path.join(compilation_database_folder, 'compile_commands.json')):
   database = ycm_core.CompilationDatabase(compilation_database_folder)
 
@@ -99,7 +99,7 @@ def FindChromeSrcFromFilename(filename):
   """
   curdir = os.path.normpath(os.path.dirname(filename))
   while not (
-      os.path.basename(curdir) == 'skia' and PathExists(curdir, 'DEPS') and
+      os.path.basename(curdir) == 'skia-next' and PathExists(curdir, 'DEPS') and
       (PathExists(curdir, '..', '.gclient') or PathExists(curdir, '.git'))):
     nextdir = os.path.normpath(os.path.join(curdir, '..'))
     if nextdir == curdir:

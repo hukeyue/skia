@@ -20,7 +20,7 @@ def GetNinjaOutputDirectory(chrome_root):
 
   If either of the following environment variables are set, their
   value is used to determine the output directory:
-    1. SKIA_OUT_DIR environment variable.
+    1. SKIA_NEXT_OUT_DIR environment variable.
     2. GYP_GENERATOR_FLAGS environment variable output_dir property.
 
   Otherwise, all directories starting with the word out are examined.
@@ -29,9 +29,9 @@ def GetNinjaOutputDirectory(chrome_root):
   """
 
   output_dirs = []
-  if ('SKIA_OUT_DIR' in os.environ and
-      os.path.isdir(os.path.join(chrome_root, os.environ['SKIA_OUT_DIR']))):
-    output_dirs = [os.environ['SKIA_OUT_DIR']]
+  if ('SKIA_NEXT_OUT_DIR' in os.environ and
+      os.path.isdir(os.path.join(chrome_root, os.environ['SKIA_NEXT_OUT_DIR']))):
+    output_dirs = [os.environ['SKIA_NEXT_OUT_DIR']]
   if not output_dirs:
     generator_flags = os.getenv('GYP_GENERATOR_FLAGS', '').split(' ')
     for flag in generator_flags:
