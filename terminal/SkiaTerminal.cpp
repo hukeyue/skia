@@ -681,7 +681,7 @@ static bool create_conpty(int dw, int dh, int ws_row, int ws_col, SOCKET *fd, Ap
     ctx->hThread = process_information.hThread;
     ctx->hProcess = process_information.hProcess;
     if (socketpair(&ctx->socket, &client) < 0) {
-        SkDebugf("conpty: socketpair failed\n")
+        SkDebugf("conpty: socketpair failed\n");
         fSuccess = false;
         goto cleanup;
     }
