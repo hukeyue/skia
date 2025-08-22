@@ -448,5 +448,7 @@ def Settings(**kwargs):
   if sys.platform == 'win32':
     if 'clang-cl.exe' in final_flags[0]:
       final_flags = final_flags[1:]
+    if '--driver-mode=cl' in final_flags[0]:
+      final_flags = final_flags[1:]
 
   return {'flags': final_flags, 'do_cache': should_cache_flags_for_file}
