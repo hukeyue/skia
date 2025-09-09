@@ -840,17 +840,17 @@ static void close_conpty(socket_t fd) {
 
 // Creates a star type shape using a SkPath
 static SkPath create_star() {
-    static const int kNumPoints = 5;
+    static const int kNumPoints = 19;
     SkPath concavePath;
     SkPoint points[kNumPoints] = {{0, SkIntToScalar(-50)}};
     SkMatrix rot;
-    rot.setRotate(SkIntToScalar(360) / kNumPoints);
+    rot.setRotate(SkIntToScalar(360 * 7) / kNumPoints);
     for (int i = 1; i < kNumPoints; ++i) {
         rot.mapPoints(points + i, points + i - 1, 1);
     }
     concavePath.moveTo(points[0]);
     for (int i = 0; i < kNumPoints; ++i) {
-        concavePath.lineTo(points[(2 * i) % kNumPoints]);
+        concavePath.lineTo(points[(7 * i) % kNumPoints]);
     }
     concavePath.setFillType(SkPathFillType::kEvenOdd);
     SkASSERT(!concavePath.isConvex());
