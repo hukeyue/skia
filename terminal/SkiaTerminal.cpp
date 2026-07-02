@@ -95,7 +95,9 @@ typedef int socket_t;
 constexpr socket_t invalid_socket_t = -1;
 #endif
 
-static bool resize_conpty(int dw, int dh, int ws_row, int ws_col, socket_t fd);
+struct ApplicationState;
+
+static bool resize_conpty(int ws_row, int ws_col, socket_t fd, ApplicationState *state);
 
 /*
  * This application is a simple example of how to combine SDL and Skia it demonstrates:
@@ -150,13 +152,13 @@ static void handle_size_change(ApplicationState* state, SDL_Window* window, SkCa
     glClear(GL_COLOR_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
 
     gState->fRow = (dw / state->fWidthScale) / state->fFontAdvanceWidth;
-    gState->fCol = (dh / state->fHeightScale + state->fFontSpacing) / (state->fFontSize + state->fFontSpacing) - 1;
+    gState->fCol = (dh / state->fHeightScale + state->fFontSpacing) / (state->fFontSize + state->fFontSpacing);
     gState->fDw = dw;
     gState->fDh = dh;
 
     SkDebugf("resize row %d col %d\n", gState->fRow, gState->fCol);
 
-    if (!resize_conpty(dw, dh, gState->fRow, gState->fCol, fd)) {
+    if (!resize_conpty(gState->fRow, gState->fCol, fd, gState)) {
         SkDebugf("resize_conpty: failed to resize conpty\n");
         return;
     }
@@ -302,17 +304,18 @@ static void handle_sdl_events(ApplicationState* state, SDL_Window* window, SkCan
                 state->fRedraw = true;
                 break;
             }
-#if 0
             case SDL_WINDOWEVENT: {
                 switch (event.window.event) {
                     case SDL_WINDOWEVENT_RESIZED:
                         // Use SDL_GL_GetDrawableSize to measure the layout change
                         handle_size_change(state, window, canvas, fd, screen, vte);
                         break;
+                    default:
+                        SkDebugf("sdl: window event 0x%x\n", event.window.event);
+                        break;
                 }
                 break;
             }
-#endif
             case SDL_QUIT:
                 state->fQuit = true;
                 break;
@@ -595,7 +598,7 @@ fail:
     return -1;
 }
 
-static bool create_conpty(int dw, int dh, int ws_row, int ws_col, SOCKET *fd, ApplicationState *state) {
+static bool create_conpty(int ws_row, int ws_col, SOCKET *fd, ApplicationState *state) {
     HMODULE hLibrary = EnsureKernel32Loaded();
     HRESULT hr = S_OK;
     PFNCREATEPSEUDOCONSOLE const CreatePseudoConsole = (PFNCREATEPSEUDOCONSOLE)GetProcAddress(hLibrary, "CreatePseudoConsole");
@@ -705,7 +708,7 @@ cleanup:
     return fSuccess;
 }
 
-static bool resize_conpty(int dw, int dh, int ws_row, int ws_col, socket_t /*fd*/) {
+static bool resize_conpty(int ws_row, int ws_col, socket_t /*fd*/, ApplicationState* state) {
     HMODULE hLibrary = EnsureKernel32Loaded();
     HRESULT hr = S_OK;
     PFNRESIZEPSEUDOCONSOLE const ResizePseudoConsole = (PFNRESIZEPSEUDOCONSOLE)GetProcAddress(hLibrary, "ResizePseudoConsole");
@@ -758,13 +761,15 @@ cleanup:
     gListenCtx = nullptr;
 }
 #else
-static bool create_conpty(int dw, int dh, int ws_row, int ws_col, int *fd, ApplicationState *state) {
-    struct termios term {};
-    struct winsize ws {};
+static bool create_conpty(int ws_row, int ws_col, int *fd, ApplicationState *state) {
+    struct termios term;
+    struct winsize ws;
+    memset(&term, 0, sizeof(term));
+    memset(&ws, 0, sizeof(ws));
 
     term.c_iflag = TTYDEF_IFLAG | IUTF8;
     term.c_oflag = TTYDEF_OFLAG;
-    term.c_lflag = TTYDEF_LFLAG | ECHONL | PENDIN;
+    term.c_lflag = TTYDEF_LFLAG | PENDIN;
     term.c_cflag = TTYDEF_CFLAG;
 
     term.c_ispeed = TTYDEF_SPEED;
@@ -795,10 +800,8 @@ static bool create_conpty(int dw, int dh, int ws_row, int ws_col, int *fd, Appli
     term.c_cc[VWERASE] = CWERASE;    // ICANON together with IEXTEN
     term.c_cc[VREPRINT] = CREPRINT;  // ICANON together with IEXTEN
 
-    ws.ws_row = ws_row;
-    ws.ws_col = ws_col;
-    ws.ws_xpixel = dw;
-    ws.ws_ypixel = dh;
+    ws.ws_row = ws_col;
+    ws.ws_col = ws_row;
 
     // Using the same way just like Terminal.app
     pid_t pid = ::forkpty(fd, nullptr, &term, &ws);
@@ -813,23 +816,28 @@ static bool create_conpty(int dw, int dh, int ws_row, int ws_col, int *fd, Appli
         SkDebugf("something wrong with forkpty: %s\n", strerror(errno));
         return false;
     }
+
+
     fcntl(*fd, F_SETFL, O_NONBLOCK);
+
+    SkDebugf("forkpty: row %d col %d\n", ws_row, ws_col);
 
     return true;
 }
 
-static bool resize_conpty(int dw, int dh, int ws_row, int ws_col, socket_t fd) {
+static bool resize_conpty(int ws_row, int ws_col, socket_t fd, ApplicationState *state) {
     struct winsize ws;
+    memset(&ws, 0, sizeof(ws));
 
-    ws.ws_row = ws_row;
-    ws.ws_col = ws_col;
-    ws.ws_xpixel = dw;
-    ws.ws_ypixel = dh;
+    ws.ws_row = ws_col;
+    ws.ws_col = ws_row;
 
     if (ioctl(fd, TIOCSWINSZ, &ws) < 0) {
         SkDebugf("resize_conpty: TIOCSWINSZ %s", strerror(errno));
         return false;
     }
+
+    SkDebugf("TIOCSWINSZ: row %d col %d\n", ws_row, ws_col);
     return true;
 }
 
@@ -1445,10 +1453,11 @@ int main(int argc, char** argv) {
     state.fFontAdvanceWidth = gFont->measureText("X", 1U, SkTextEncoding::kUTF8, nullptr);
     state.fFontSpacing = std::min(1.0f, gFont->getSpacing());
 
+    SkDebugf("default: cell width %f col %f\n", state.fFontAdvanceWidth, state.fFontSize + state.fFontSpacing);
     SkDebugf("default: row %d col %d\n", DEFAULT_ROW, DEFAULT_COL);
-    dm.w = std::min<float>(dm.w, state.fFontAdvanceWidth * DEFAULT_ROW);
-    dm.h = std::min<float>(dm.h, (state.fFontSize + state.fFontSpacing) * (DEFAULT_COL + 1) - state.fFontSpacing);
-    SkDebugf("dm: dw %d dh %d\n", dm.w, dm.h);
+    dm.w = std::max<float>(dm.w * 0.25f, state.fFontAdvanceWidth * DEFAULT_ROW);
+    dm.h = std::max<float>(dm.h * 0.25f, (state.fFontSize + state.fFontSpacing) * DEFAULT_COL - state.fFontSpacing);
+    SkDebugf("window: width %d height %d\n", dm.w, dm.h);
 
     window = SDL_CreateWindow("SkTerminal", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, dm.w, dm.h, windowFlags);
 
@@ -1482,7 +1491,7 @@ int main(int argc, char** argv) {
 
     int dw, dh;
     SDL_GL_GetDrawableSize(window, &dw, &dh);
-    SkDebugf("init: dw %d dh %d\n", dw, dh);
+    SkDebugf("gl: width %d height %d\n", dw, dh);
 
     glViewport(0, 0, dw, dh);
     glClearColor(1, 1, 1, 1);
@@ -1548,13 +1557,12 @@ int main(int argc, char** argv) {
 
     TsmVteCtx vte_ctx { &state, invalid_socket_t };
     int ws_row = (float)(dm.w) / state.fFontAdvanceWidth;
-    int ws_col = (float)(dm.h + state.fFontSpacing) / (state.fFontSize + state.fFontSpacing) - 1;
+    int ws_col = (float)(dm.h + state.fFontSpacing) / (state.fFontSize + state.fFontSpacing);
     SkDebugf("init: row %d col %d\n", ws_row, ws_col);
-    if (!create_conpty(dw, dh, ws_row, ws_col, &vte_ctx.fd, &state)) {
+    if (!create_conpty(ws_row, ws_col, &vte_ctx.fd, &state)) {
         SkDebugf("init: failed to create conpty\n");
         return -1;
     }
-    SkDebugf("init: conpty created\n");
 
     // create a software-based virtual terminal
     struct tsm_screen* screen = nullptr;
@@ -1580,6 +1588,11 @@ int main(int argc, char** argv) {
         ret = term_read_cb(vte, buf, sizeof(buf), vte_ctx.fd, &is_eof, &should_retry);
         if (ret > 0) {
             SkDebugf("term_read_cb: %ld\n", ret);
+#if 0
+            for (int i = 0; i < ret; ++i) {
+              SkDebugf("term: %d 0x%x %c\n", i, buf[i], buf[i]);
+            }
+#endif
             tsm_vte_input(vte, buf, ret);
             state.fRedraw = true;
         } else if (should_retry) {
