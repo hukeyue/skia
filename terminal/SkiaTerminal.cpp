@@ -118,6 +118,7 @@ struct ApplicationState {
     float fFontSpacing;
     double fWidthScale;
     double fHeightScale;
+    SDL_DisplayMode fDm;
     int32_t fRow;
     int32_t fCol;
     int32_t fDw;
@@ -129,6 +130,12 @@ struct ApplicationState {
 #endif
 };
 
+struct GLState {
+  sk_sp<const GrGLInterface> glInterface;
+  sk_sp<GrDirectContext> grContext;
+  sk_sp<SkSurface> surface;
+};
+
 static void handle_sdl_error() {
     const char* error = SDL_GetError();
     SkDebugf("SDL Error: %s\n", error);
@@ -137,36 +144,118 @@ static void handle_sdl_error() {
 
 static SkFont *gFont, *gFontBold;
 static ApplicationState *gState;
+static GLState *glState;
 
-static void handle_size_change(ApplicationState* state, SDL_Window* window, SkCanvas* canvas,
-                               socket_t fd, struct tsm_screen* screen, struct tsm_vte* vte) {
-    int dw, dh;
-    state->fFontAdvanceWidth = gFont->measureText("X", 1U, SkTextEncoding::kUTF8, nullptr);
-    state->fFontSpacing = std::min(1.0f, gFont->getSpacing());
-
-    SDL_GL_GetDrawableSize(window, &dw, &dh);
-
+static SkCanvas* glGetCanvas(int dw, int dh, uint32_t windowFormat, int contextType, double widthScale, double heightScale) {
     glViewport(0, 0, dw, dh);
     glClearColor(1, 1, 1, 1);
     glClearStencil(0);
     glClear(GL_COLOR_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
 
-    gState->fRow = (dw / state->fWidthScale) / state->fFontAdvanceWidth;
-    gState->fCol = (dh / state->fHeightScale + state->fFontSpacing) / (state->fFontSize + state->fFontSpacing);
-    gState->fDw = dw;
-    gState->fDh = dh;
+    // setup GrContext
+    glState->glInterface = GrGLMakeNativeInterface();
+    if (!glState->glInterface.get()) {
+        SkDebugf("GrGLMakeNativeInterface Error\n");
+        return nullptr;
+    }
 
-    SkDebugf("resize row %d col %d\n", gState->fRow, gState->fCol);
+    // setup contexts
+    glState->grContext = GrDirectContexts::MakeGL(glState->glInterface, GrContextOptions());
+    if (!glState->grContext.get()) {
+        SkDebugf("GrDirectContexts::MakeGL Error\n");
+        return nullptr;
+    }
 
-    if (!resize_conpty(gState->fRow, gState->fCol, fd, gState)) {
+    // Wrap the frame buffer object attached to the screen in a Skia render target so Skia can
+    // render to it
+    GrGLint buffer;
+    GR_GL_GetIntegerv(glState->glInterface.get(), GR_GL_FRAMEBUFFER_BINDING, &buffer);
+    GrGLFramebufferInfo info;
+    info.fFBOID = (GrGLuint)buffer;
+    SkColorType colorType;
+
+    // SkDebugf("%s", SDL_GetPixelFormatName(windowFormat));
+    // TODO: the windowFormat is never any of these?
+    if (SDL_PIXELFORMAT_RGBA8888 == windowFormat) {
+        info.fFormat = GR_GL_RGBA8;
+        colorType = kRGBA_8888_SkColorType;
+    } else {
+        colorType = kBGRA_8888_SkColorType;
+        if (SDL_GL_CONTEXT_PROFILE_ES == contextType) {
+            info.fFormat = GR_GL_BGRA8;
+        } else {
+            // We assume the internal format is RGBA8 on desktop GL
+            info.fFormat = GR_GL_RGBA8;
+        }
+    }
+
+    static const int kMsaaSampleCount = 0;  // 4;
+    static const int kStencilBits = 8;  // Skia needs 8 stencil bits
+    auto target = GrBackendRenderTargets::MakeGL(dw, dh, kMsaaSampleCount, kStencilBits, info);
+
+    // setup SkSurface
+    // To use distance field text, use commented out SkSurfaceProps instead
+    // SkSurfaceProps props(SkSurfaceProps::kUseDeviceIndependentFonts_Flag,
+    //                      SkSurfaceProps::kUnknown_SkPixelGeometry);
+    SkSurfaceProps props;
+
+    glState->surface = (SkSurfaces::WrapBackendRenderTarget(glState->grContext.get(), target,
+                                                            kBottomLeft_GrSurfaceOrigin,
+                                                            colorType, nullptr, &props));
+
+    SkCanvas* canvas = glState->surface->getCanvas();
+    if (!canvas) {
+        SkDebugf("getCanvas Error\n");
+        return nullptr;
+    }
+    canvas->scale(widthScale, heightScale);
+    return canvas;
+}
+
+static void handle_size_change(ApplicationState* state, SDL_Window* window, SkCanvas** canvas,
+                               socket_t fd, struct tsm_screen* screen, struct tsm_vte* vte) {
+
+    int dw, dh;
+
+    SDL_GetWindowSize(window, &state->fDm.w, &state->fDm.h);
+    SkDebugf("window: width %d height %d\n", state->fDm.w, state->fDm.h);
+
+    SDL_GL_GetDrawableSize(window, &dw, &dh);
+    SkDebugf("gl: width %d height %d\n", dw, dh);
+
+    state->fDw = dw;
+    state->fDh = dh;
+
+    state->fWidthScale = (double)dw / state->fDm.w;
+    state->fHeightScale = (double)dh / state->fDm.h;
+    SkDebugf("scale: width: %.02f, height: %.02f\n", state->fWidthScale, state->fHeightScale);
+
+    uint32_t windowFormat = SDL_GetWindowPixelFormat(window);
+    int contextType;
+    SDL_GL_GetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, &contextType);
+
+    *canvas = glGetCanvas(dw, dh, windowFormat, contextType, state->fWidthScale, state->fHeightScale);
+    (*canvas)->clear(SK_ColorWHITE);
+
+    state->fFontAdvanceWidth = gFont->measureText("X", 1U, SkTextEncoding::kUTF8, nullptr);
+    state->fFontSpacing = std::min(1.0f, gFont->getSpacing());
+
+    int ws_row = (dw / state->fWidthScale) / state->fFontAdvanceWidth;
+    int ws_col = (dh / state->fHeightScale + state->fFontSpacing) / (state->fFontSize + state->fFontSpacing);
+
+    SkDebugf("resize: cell width %f col %f\n", state->fFontAdvanceWidth, state->fFontSize + state->fFontSpacing);
+    SkDebugf("resize: row %d col %d\n", ws_row, ws_col);
+    SkDebugf("resize: font size %.1f\n", state->fFontSize);
+
+    if (!resize_conpty(ws_row, ws_col, fd, state)) {
         SkDebugf("resize_conpty: failed to resize conpty\n");
         return;
     }
-    tsm_screen_resize(screen, gState->fRow, gState->fCol);
+    tsm_screen_resize(screen, ws_row, ws_col);
     state->fRedraw = true;
 }
 
-static void handle_sdl_events(ApplicationState* state, SDL_Window* window, SkCanvas* canvas,
+static void handle_sdl_events(ApplicationState* state, SDL_Window* window, SkCanvas** canvas,
                               socket_t fd, struct tsm_screen* screen, struct tsm_vte* vte) {
     SDL_Event event;
     while (SDL_PollEvent(&event)) {
@@ -1443,8 +1532,7 @@ int main(int argc, char** argv) {
 
     // Setup window
     // This code will create a window with the same resolution as the user's desktop.
-    SDL_DisplayMode dm;
-    if (SDL_GetDesktopDisplayMode(0, &dm) != 0) {
+    if (SDL_GetDesktopDisplayMode(0, &state.fDm) != 0) {
         handle_sdl_error();
         return 1;
     }
@@ -1455,11 +1543,11 @@ int main(int argc, char** argv) {
 
     SkDebugf("default: cell width %f col %f\n", state.fFontAdvanceWidth, state.fFontSize + state.fFontSpacing);
     SkDebugf("default: row %d col %d\n", DEFAULT_ROW, DEFAULT_COL);
-    dm.w = std::max<float>(dm.w * 0.25f, state.fFontAdvanceWidth * DEFAULT_ROW);
-    dm.h = std::max<float>(dm.h * 0.25f, (state.fFontSize + state.fFontSpacing) * DEFAULT_COL - state.fFontSpacing);
-    SkDebugf("window: width %d height %d\n", dm.w, dm.h);
+    SkDebugf("default: font size %.1f\n", state.fFontSize);
+    state.fDm.w = std::max<float>(state.fDm.w * 0.25f, state.fFontAdvanceWidth * DEFAULT_ROW);
+    state.fDm.h = std::max<float>(state.fDm.h * 0.25f, (state.fFontSize + state.fFontSpacing) * DEFAULT_COL - state.fFontSpacing);
 
-    window = SDL_CreateWindow("SkTerminal", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, dm.w, dm.h, windowFlags);
+    window = SDL_CreateWindow("SkTerminal", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, state.fDm.w, state.fDm.h, windowFlags);
 
     if (!window) {
         handle_sdl_error();
@@ -1469,8 +1557,8 @@ int main(int argc, char** argv) {
     // To go fullscreen
     // SDL_SetWindowFullscreen(window, SDL_WINDOW_FULLSCREEN);
 
-    // Disable resize until we handle it correctly (as Terminal.app)
-    SDL_SetWindowResizable(window, SDL_FALSE);
+    // Enable Resizable
+    SDL_SetWindowResizable(window, SDL_TRUE);
 
     // try and setup a GL context
     glContext = SDL_GL_CreateContext(window);
@@ -1489,80 +1577,41 @@ int main(int argc, char** argv) {
     int contextType;
     SDL_GL_GetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, &contextType);
 
+    SDL_GetWindowSize(window, &state.fDm.w, &state.fDm.h);
+    SkDebugf("window: width %d height %d\n", state.fDm.w, state.fDm.h);
+
     int dw, dh;
     SDL_GL_GetDrawableSize(window, &dw, &dh);
     SkDebugf("gl: width %d height %d\n", dw, dh);
 
-    glViewport(0, 0, dw, dh);
-    glClearColor(1, 1, 1, 1);
-    glClearStencil(0);
-    glClear(GL_COLOR_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+    gState->fDw = dw;
+    gState->fDh = dh;
 
-    // setup GrContext
-    auto glInterface = GrGLMakeNativeInterface();
-    if (!glInterface.get()) {
-        SkDebugf("GrGLMakeNativeInterface Error\n");
-        return -1;
-    }
-
-    // setup contexts
-    sk_sp<GrDirectContext> grContext = GrDirectContexts::MakeGL(glInterface, GrContextOptions());
-    if (!grContext.get()) {
-        SkDebugf("GrDirectContexts::MakeGL Error\n");
-        return -1;
-    }
-
-    // Wrap the frame buffer object attached to the screen in a Skia render target so Skia can
-    // render to it
-    GrGLint buffer;
-    GR_GL_GetIntegerv(glInterface.get(), GR_GL_FRAMEBUFFER_BINDING, &buffer);
-    GrGLFramebufferInfo info;
-    info.fFBOID = (GrGLuint)buffer;
-    SkColorType colorType;
-
-    // SkDebugf("%s", SDL_GetPixelFormatName(windowFormat));
-    // TODO: the windowFormat is never any of these?
-    if (SDL_PIXELFORMAT_RGBA8888 == windowFormat) {
-        info.fFormat = GR_GL_RGBA8;
-        colorType = kRGBA_8888_SkColorType;
-    } else {
-        colorType = kBGRA_8888_SkColorType;
-        if (SDL_GL_CONTEXT_PROFILE_ES == contextType) {
-            info.fFormat = GR_GL_BGRA8;
-        } else {
-            // We assume the internal format is RGBA8 on desktop GL
-            info.fFormat = GR_GL_RGBA8;
-        }
-    }
-
-    auto target = GrBackendRenderTargets::MakeGL(dw, dh, kMsaaSampleCount, kStencilBits, info);
-
-    // setup SkSurface
-    // To use distance field text, use commented out SkSurfaceProps instead
-    // SkSurfaceProps props(SkSurfaceProps::kUseDeviceIndependentFonts_Flag,
-    //                      SkSurfaceProps::kUnknown_SkPixelGeometry);
-    SkSurfaceProps props;
-
-    sk_sp<SkSurface> surface(SkSurfaces::WrapBackendRenderTarget(grContext.get(), target,
-                                                                 kBottomLeft_GrSurfaceOrigin,
-                                                                 colorType, nullptr, &props));
-
-    SkCanvas* canvas = surface->getCanvas();
-    canvas->scale((double)dw / dm.w, (double)dh / dm.h);
-    state.fWidthScale = (double)dw / dm.w;
-    state.fHeightScale = (double)dh / dm.h;
+    state.fWidthScale = (double)dw / state.fDm.w;
+    state.fHeightScale = (double)dh / state.fDm.h;
     SkDebugf("scale: width: %.02f, height: %.02f\n", state.fWidthScale, state.fHeightScale);
+
+    GLState _glState;
+    glState = &_glState;
+
+    auto canvas = glGetCanvas(dw, dh, windowFormat, contextType, state.fWidthScale, state.fHeightScale);
+    if (!canvas) {
+        return -1;
+    }
+
     sk_sp<SkImage> starImage = draw_star_image(canvas);
     sk_sp<SkImage> termImage;
 
     TsmVteCtx vte_ctx { &state, invalid_socket_t };
-    int ws_row = (float)(dm.w) / state.fFontAdvanceWidth;
-    int ws_col = (float)(dm.h + state.fFontSpacing) / (state.fFontSize + state.fFontSpacing);
+    int ws_row = (float)(state.fDm.w) / state.fFontAdvanceWidth;
+    int ws_col = (float)(state.fDm.h + state.fFontSpacing) / (state.fFontSize + state.fFontSpacing);
     SkDebugf("init: row %d col %d\n", ws_row, ws_col);
     if (!create_conpty(ws_row, ws_col, &vte_ctx.fd, &state)) {
         SkDebugf("init: failed to create conpty\n");
         return -1;
     }
+    gState->fRow = ws_row;
+    gState->fCol = ws_col;
 
     // create a software-based virtual terminal
     struct tsm_screen* screen = nullptr;
@@ -1580,7 +1629,7 @@ int main(int argc, char** argv) {
         state.fRedraw = false;
 
         canvas->clear(SK_ColorWHITE);
-        handle_sdl_events(&state, window, canvas, vte_ctx.fd, screen, vte);
+        handle_sdl_events(&state, window, &canvas, vte_ctx.fd, screen, vte);
 
         long ret = -1;
         char buf[4096];
@@ -1615,7 +1664,7 @@ redraw:
 
         // draw offscreen star canvas
         canvas->save();
-        canvas->translate(dm.w / 2.0 , dm.h / 2.0);
+        canvas->translate(state.fDm.w / 2.0 , state.fDm.h / 2.0);
         canvas->rotate(rotation++);
         canvas->drawImage(starImage, -50.0f, -50.0f);
         canvas->restore();
