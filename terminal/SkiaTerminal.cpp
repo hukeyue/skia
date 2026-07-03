@@ -1636,16 +1636,12 @@ int main(int argc, char** argv) {
         bool is_eof = false, should_retry = false;
         ret = term_read_cb(vte, buf, sizeof(buf), vte_ctx.fd, &is_eof, &should_retry);
         if (ret > 0) {
-            SkDebugf("term_read_cb: %ld\n", ret);
 #if 0
-            for (int i = 0; i < ret; ++i) {
-              SkDebugf("term: %d 0x%x %c\n", i, buf[i], buf[i]);
-            }
+            SkDebugf("term_read_cb: %ld\n", ret);
 #endif
             tsm_vte_input(vte, buf, ret);
             state.fRedraw = true;
         } else if (should_retry) {
-            SDL_Delay(16); // FIXME
             goto redraw;
         } else {
             SkASSERT(is_eof);
