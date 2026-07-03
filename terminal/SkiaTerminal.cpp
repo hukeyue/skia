@@ -108,11 +108,13 @@ static bool resize_conpty(int ws_row, int ws_col, socket_t fd, ApplicationState 
  */
 
 struct ApplicationState {
-    ApplicationState() : fQuit(false), fRedraw(false), fFontSize(12.0), fFontAdvanceWidth(), fFontSpacing() {}
+    ApplicationState() : fQuit(false), fFontSize(12.0), fFontAdvanceWidth(), fFontSpacing() {}
     // Storage for the user created rectangles. The last one may still be being edited.
     std::vector<SkRect> fRects;
     std::atomic_bool fQuit;
-    bool fRedraw;
+    bool fRedraw = false;
+    bool fRedrawQueued = false;
+    uint32_t fRedrawTimerId = 0x0;
     float fFontSize;
     float fFontAdvanceWidth;
     float fFontSpacing;
@@ -216,6 +218,11 @@ static void handle_size_change(ApplicationState* state, SDL_Window* window, SkCa
                                socket_t fd, struct tsm_screen* screen, struct tsm_vte* vte) {
 
     int dw, dh;
+
+    SDL_GetWindowDisplayMode(window, &state->fDm);
+    SkDebugf("window: refresh rate %d\n", state->fDm.refresh_rate);
+    if (state->fDm.refresh_rate == 0)
+      state->fDm.refresh_rate = 60;
 
     SDL_GetWindowSize(window, &state->fDm.w, &state->fDm.h);
     SkDebugf("window: width %d height %d\n", state->fDm.w, state->fDm.h);
@@ -407,6 +414,10 @@ static void handle_sdl_events(ApplicationState* state, SDL_Window* window, SkCan
             }
             case SDL_QUIT:
                 state->fQuit = true;
+                break;
+            case SDL_USEREVENT:
+                SkDebugf("user event\n");
+                state->fRedrawQueued = true;
                 break;
             default:
                 break;
@@ -1501,7 +1512,7 @@ int main(int argc, char** argv) {
     /*
      * In a real application you might want to initialize more subsystems
      */
-    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS) != 0) {
+    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS | SDL_INIT_TIMER) != 0) {
         handle_sdl_error();
         return 1;
     }
@@ -1577,6 +1588,12 @@ int main(int argc, char** argv) {
     int contextType;
     SDL_GL_GetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, &contextType);
 
+    SDL_GetWindowDisplayMode(window, &state.fDm);
+    SkDebugf("window: refresh rate %d\n", state.fDm.refresh_rate);
+
+    if (state.fDm.refresh_rate == 0)
+      state.fDm.refresh_rate = 60;
+
     SDL_GetWindowSize(window, &state.fDm.w, &state.fDm.h);
     SkDebugf("window: width %d height %d\n", state.fDm.w, state.fDm.h);
 
@@ -1642,6 +1659,8 @@ int main(int argc, char** argv) {
 #endif
             tsm_vte_input(vte, buf, ret);
             state.fRedraw = true;
+        } else if (state.fRedrawQueued) {
+            goto redraw;
         } else if (should_retry) {
             goto redraw;
         } else {
@@ -1649,11 +1668,35 @@ int main(int argc, char** argv) {
             break;
         }
 
-        if (state.fRedraw) {
-            termImage = draw_term_image(canvas, &state, vte, screen);
+        if (state.fRedraw && !state.fRedrawQueued) {
+            SkDebugf("term_redraw required\n");
+            gState->fRedraw = false;
+            if (state.fRedrawTimerId == 0) {
+                gState->fRedrawTimerId = SDL_AddTimer(1000.0f / state.fDm.refresh_rate,
+                                                      [](uint32_t, void*) -> uint32_t {
+                    SkDebugf("term_redraw queued\n");
+                    gState->fRedrawTimerId = 0;
+
+                    SDL_Event user_event;
+                    SDL_zero(user_event); // Initialize the event structure
+                    user_event.type = SDL_USEREVENT; // Custom event type
+                    user_event.user.code = 1; // Custom code
+                    user_event.user.data1 = NULL;
+                    user_event.user.data2 = NULL;
+
+                    SDL_PushEvent(&user_event);
+                    return 0;
+                }, nullptr);
+            }
         }
 
 redraw:
+        if (state.fRedrawQueued) {
+            SkDebugf("term_redraw triggered\n");
+            state.fRedrawQueued = false;
+            termImage = draw_term_image(canvas, &state, vte, screen);
+        }
+
         // draw offscreen terminal canvas
         canvas->save();
         canvas->drawImage(termImage, 0, 0);
