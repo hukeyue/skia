@@ -1618,7 +1618,8 @@ int main(int argc, char** argv) {
     struct tsm_vte* vte;
 
     tsm_screen_new(&screen, log_tsm, screen);
-    tsm_screen_set_max_sb(screen, 10240);
+    // increases scrollback size to 500k lines
+    tsm_screen_set_max_sb(screen, 500000);
     tsm_screen_resize(screen, ws_row, ws_col);
 
     tsm_vte_new(&vte, screen, term_write_cb, &vte_ctx, log_tsm, screen);
