@@ -287,30 +287,6 @@ static void handle_sdl_events(ApplicationState* state, SDL_Window* window, SkCan
                 // SDL_Scancode scancode = SDL_GetScancodeFromKey(key);
                 uint16_t modifier = event.key.keysym.mod;
 
-                /* SHIFT + UP/DOWN/PAGEUP/PAGEDOWN */
-                if (modifier & (KMOD_LSHIFT | KMOD_RSHIFT)) {
-                    switch (key) {
-                        case SDLK_UP:
-                            tsm_screen_sb_up(screen, 1);
-                            state->fRedraw = true;
-                            return;
-                        case SDLK_DOWN:
-                            tsm_screen_sb_down(screen, 1);
-                            state->fRedraw = true;
-                            return;
-                        case SDLK_PAGEUP:
-                            tsm_screen_sb_page_up(screen, 1);
-                            state->fRedraw = true;
-                            return;
-                        case SDLK_PAGEDOWN:
-                            tsm_screen_sb_page_down(screen, 1);
-                            state->fRedraw = true;
-                            return;
-                        default:
-                            break;
-                    }
-                }
-
                 /*  CTRL+SHIFT +/-  Zoom */
                 if (modifier & KMOD_SHIFT && modifier & KMOD_CTRL &&
                     !(modifier & KMOD_ALT)) {
@@ -393,9 +369,43 @@ static void handle_sdl_events(ApplicationState* state, SDL_Window* window, SkCan
                     // TBD paste to vte
                 }
 #endif
-                // FIXME keysym to utf32
-                if (tsm_vte_handle_keyboard(vte, key, 0, 0, key)) {
-                  tsm_screen_sb_reset(screen);
+                // https://learn.microsoft.com/en-us/windows/console/console-virtual-terminal-sequences
+                if (key == SDLK_UP) {
+#if 0 // disable vertical scroll behaviour
+                    tsm_screen_sb_up(screen, 1);
+#else
+                    tsm_vte_handle_keyboard(vte, key, 0, 0, '\033');
+                    tsm_vte_handle_keyboard(vte, key, 0, 0, '[');
+                    tsm_vte_handle_keyboard(vte, key, 0, 0, 'A');
+#endif
+                } else if (key == SDLK_DOWN) {
+#if 0 // disable vertical scroll behaviour
+                    tsm_screen_sb_down(screen, 1);
+#else
+                    tsm_vte_handle_keyboard(vte, key, 0, 0, '\033');
+                    tsm_vte_handle_keyboard(vte, key, 0, 0, '[');
+                    tsm_vte_handle_keyboard(vte, key, 0, 0, 'B');
+#endif
+                } else if (key == SDLK_RIGHT) {
+                    tsm_vte_handle_keyboard(vte, key, 0, 0, '\033');
+                    tsm_vte_handle_keyboard(vte, key, 0, 0, '[');
+                    tsm_vte_handle_keyboard(vte, key, 0, 0, 'C');
+                } else if (key == SDLK_LEFT) {
+                    tsm_vte_handle_keyboard(vte, key, 0, 0, '\033');
+                    tsm_vte_handle_keyboard(vte, key, 0, 0, '[');
+                    tsm_vte_handle_keyboard(vte, key, 0, 0, 'D');
+                } else if (key == SDLK_HOME) {
+                    tsm_screen_sb_page_up(screen, INT_MAX);
+                } else if (key == SDLK_END) {
+                    tsm_screen_sb_page_down(screen, INT_MAX);
+                } else if (key == SDLK_PAGEUP) {
+                    tsm_screen_sb_page_up(screen, 1);
+                } else if (key == SDLK_PAGEDOWN) {
+                    tsm_screen_sb_page_down(screen, 1);
+                } else if (tsm_vte_handle_keyboard(vte, key, 0, 0, key)) {
+                    // FIXME keysym to utf32
+                    SkDebugf("sdl: key event %d\n", key);
+                    tsm_screen_sb_reset(screen);
                 }
                 state->fRedraw = true;
                 break;
@@ -1660,7 +1670,7 @@ int main(int argc, char** argv) {
             tsm_vte_input(vte, buf, ret);
             state.fRedraw = true;
         } else if (state.fRedrawQueued) {
-            goto redraw;
+            goto redraw_queued;
         } else if (should_retry) {
             goto redraw;
         } else {
@@ -1668,7 +1678,8 @@ int main(int argc, char** argv) {
             break;
         }
 
-        if (state.fRedraw && !state.fRedrawQueued) {
+redraw:
+        if (state.fRedraw) {
             SkDebugf("term_redraw required\n");
             gState->fRedraw = false;
             if (state.fRedrawTimerId == 0) {
@@ -1690,7 +1701,7 @@ int main(int argc, char** argv) {
             }
         }
 
-redraw:
+redraw_queued:
         if (state.fRedrawQueued) {
             SkDebugf("term_redraw triggered\n");
             state.fRedrawQueued = false;
