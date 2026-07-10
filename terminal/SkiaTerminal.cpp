@@ -226,7 +226,9 @@ static SkCanvas* glGetCanvas(int dw, int dh, uint32_t windowFormat, int contextT
     return canvas;
 }
 
-static void handle_size_change(ApplicationState* state, SDL_Window* window, SkCanvas** canvas,
+static sk_sp<SkImage> draw_star_image(SkCanvas *canvas, float r);
+
+static void handle_size_change(ApplicationState* state, SDL_Window* window, SkCanvas** canvas, sk_sp<SkImage>* starImage,
                                socket_t fd, struct tsm_screen* screen, struct tsm_vte* vte) {
 
     int dw, dh;
@@ -282,7 +284,12 @@ static void handle_size_change(ApplicationState* state, SDL_Window* window, SkCa
     SDL_GL_GetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, &contextType);
 
     *canvas = glGetCanvas(dw, dh, windowFormat, contextType, state->fWidthScale, state->fHeightScale);
-    (*canvas)->clear(SK_ColorWHITE);
+#ifdef SK_BUILD_FOR_WIN
+    *starImage = draw_star_image(*canvas, 50.0f * state->fWidthScale);
+#else
+    *starImage = draw_star_image(*canvas, 50.0f);
+#endif
+    (*canvas)->clear(SkColorSetARGB(0xff, 253, 246, 227));
 
     state->fFontAdvanceWidth = gFont->measureText("X", 1U, SkTextEncoding::kUTF8, nullptr);
     state->fFontSpacing = std::min(1.0f, gFont->getSpacing());
@@ -302,7 +309,7 @@ static void handle_size_change(ApplicationState* state, SDL_Window* window, SkCa
     state->fRedraw = true;
 }
 
-static void handle_sdl_events(ApplicationState* state, SDL_Window* window, SkCanvas** canvas,
+static void handle_sdl_events(ApplicationState* state, SDL_Window* window, SkCanvas** canvas, sk_sp<SkImage>* starImage,
                               socket_t fd, struct tsm_screen* screen, struct tsm_vte* vte) {
     SDL_Event event;
     while (SDL_PollEvent(&event)) {
@@ -334,13 +341,13 @@ static void handle_sdl_events(ApplicationState* state, SDL_Window* window, SkCan
                         state->fFontSize += 1.0 / state->fWidthScale;
                         gFont->setSize(state->fFontSize);
                         gFontBold->setSize(state->fFontSize);
-                        handle_size_change(state, window, canvas, fd, screen, vte);
+                        handle_size_change(state, window, canvas, starImage, fd, screen, vte);
                         return;
                     } else if (key == SDLK_MINUS && state->fFontSize - 1.0f / state->fWidthScale >= 8.0) {
                         state->fFontSize -= 1.0 / state->fWidthScale;
                         gFont->setSize(state->fFontSize);
                         gFontBold->setSize(state->fFontSize);
-                        handle_size_change(state, window, canvas, fd, screen, vte);
+                        handle_size_change(state, window, canvas, starImage, fd, screen, vte);
                         return;
                     }
                 }
@@ -454,7 +461,7 @@ static void handle_sdl_events(ApplicationState* state, SDL_Window* window, SkCan
                 switch (event.window.event) {
                     case SDL_WINDOWEVENT_RESIZED:
                         // Use SDL_GL_GetDrawableSize to measure the layout change
-                        handle_size_change(state, window, canvas, fd, screen, vte);
+                        handle_size_change(state, window, canvas, starImage, fd, screen, vte);
                         break;
                     default:
                         SkDebugf("sdl: window event 0x%x\n", event.window.event);
@@ -997,10 +1004,10 @@ static void close_conpty(socket_t fd) {
 #endif
 
 // Creates a star type shape using a SkPath
-static SkPath create_star() {
+static SkPath create_star(float r) {
     static const int kNumPoints = 19;
     SkPath concavePath;
-    SkPoint points[kNumPoints] = {{0, SkIntToScalar(-50)}};
+    SkPoint points[kNumPoints] = {{0, SkIntToScalar(-(int)r)}};
     SkMatrix rot;
     rot.setRotate(SkIntToScalar(360 * 7) / kNumPoints);
     for (int i = 1; i < kNumPoints; ++i) {
@@ -1142,6 +1149,7 @@ enum vte_color {
     VTE_COLOR_NUM
 };
 
+#if 0
 static uint8_t VTE_COLOR_palette[VTE_COLOR_NUM][3] = {
         {0, 0, 0},             /* black */
         {205, 0, 0},           /* red */
@@ -1163,7 +1171,6 @@ static uint8_t VTE_COLOR_palette[VTE_COLOR_NUM][3] = {
         {229, 229, 229},       /* light grey */
         {0, 0, 0},             /* black */
 };
-#if 0
 static uint8_t VTE_COLOR_palette_solarized[VTE_COLOR_NUM][3] = {
         [VTE_COLOR_BLACK] = {7, 54, 66},             /* black */
         [VTE_COLOR_RED] = {220, 50, 47},             /* red */
@@ -1207,7 +1214,7 @@ static uint8_t VTE_COLOR_palette_solarized_black[VTE_COLOR_NUM][3] = {
         [VTE_COLOR_FOREGROUND] = {238, 232, 213}, /* light grey */
         [VTE_COLOR_BACKGROUND] = {0, 0, 0},       /* black */
 };
-
+#endif
 static uint8_t VTE_COLOR_palette_solarized_white[VTE_COLOR_NUM][3] = {
         [VTE_COLOR_BLACK] = {7, 54, 66},             /* black */
         [VTE_COLOR_RED] = {220, 50, 47},             /* red */
@@ -1229,7 +1236,6 @@ static uint8_t VTE_COLOR_palette_solarized_white[VTE_COLOR_NUM][3] = {
         [VTE_COLOR_FOREGROUND] = {7, 54, 66},     /* black */
         [VTE_COLOR_BACKGROUND] = {238, 232, 213}, /* light grey */
 };
-#endif
 
 static SkColor term_get_fc_from_attr(const struct tsm_screen_attr* attr) {
     uint8_t fr = attr->fr, fg = attr->fg, fb = attr->fb;
@@ -1241,9 +1247,9 @@ static SkColor term_get_fc_from_attr(const struct tsm_screen_attr* attr) {
 
         if (code >= VTE_COLOR_NUM) code = VTE_COLOR_FOREGROUND;
 
-        fr = VTE_COLOR_palette[code][0];
-        fg = VTE_COLOR_palette[code][1];
-        fb = VTE_COLOR_palette[code][2];
+        fr = VTE_COLOR_palette_solarized_white[code][0];
+        fg = VTE_COLOR_palette_solarized_white[code][1];
+        fb = VTE_COLOR_palette_solarized_white[code][2];
     }
 
     return SkColorSetARGB(0xFF, fr, fg, fb);
@@ -1258,9 +1264,9 @@ static SkColor term_get_bc_from_attr(const struct tsm_screen_attr* attr) {
 
         if (code >= VTE_COLOR_NUM) code = VTE_COLOR_BACKGROUND;
 
-        br = VTE_COLOR_palette[code][0];
-        bg = VTE_COLOR_palette[code][1];
-        bb = VTE_COLOR_palette[code][2];
+        br = VTE_COLOR_palette_solarized_white[code][0];
+        bg = VTE_COLOR_palette_solarized_white[code][1];
+        bb = VTE_COLOR_palette_solarized_white[code][2];
     }
 
     return SkColorSetARGB(0xFF, br, bg, bb);
@@ -1353,7 +1359,7 @@ static int draw_cb(struct tsm_screen* con,
     return 0;
 }
 
-static sk_sp<SkImage> draw_star_image(SkCanvas *canvas) {
+static sk_sp<SkImage> draw_star_image(SkCanvas *canvas, float r) {
     SkPaint paint;
     paint.setAntiAlias(true);
 
@@ -1362,9 +1368,9 @@ static sk_sp<SkImage> draw_star_image(SkCanvas *canvas) {
 
     SkCanvas* offscreen = cpuSurface->getCanvas();
     offscreen->save();
-    paint.setColor(SK_ColorLTGRAY); // FIXME Better Color?
-    offscreen->translate(50.0f, 50.0f);
-    offscreen->drawPath(create_star(), paint);
+    paint.setColor(SkColorSetARGB(0xff, 7, 54, 66));
+    offscreen->translate(r, r);
+    offscreen->drawPath(create_star(r), paint);
     offscreen->restore();
 
     return cpuSurface->makeImageSnapshot();
@@ -1723,7 +1729,11 @@ int main(int argc, char** argv) {
         return -1;
     }
 
-    sk_sp<SkImage> starImage = draw_star_image(canvas);
+#ifdef SK_BUILD_FOR_WIN
+    sk_sp<SkImage> starImage = draw_star_image(canvas, 50.0f * state.fWidthScale);
+#else
+    sk_sp<SkImage> starImage = draw_star_image(canvas, 50.0f);
+#endif
     sk_sp<SkImage> termImage;
 
     TsmVteCtx vte_ctx { &state, invalid_socket_t };
@@ -1753,8 +1763,8 @@ int main(int argc, char** argv) {
     while (!state.fQuit) {  // Our application loop
         state.fRedraw = false;
 
-        canvas->clear(SK_ColorWHITE);
-        handle_sdl_events(&state, window, &canvas, vte_ctx.fd, screen, vte);
+        canvas->clear(SkColorSetARGB(0xff, 253, 246, 227));
+        handle_sdl_events(&state, window, &canvas, &starImage, vte_ctx.fd, screen, vte);
 
         long ret = -1;
         char buf[4096];
@@ -1814,7 +1824,11 @@ redraw_queued:
         canvas->save();
         canvas->translate(state.fDm.w / 2.0 , state.fDm.h / 2.0);
         canvas->rotate(rotation++);
+#ifdef SK_BUILD_FOR_WIN
+        canvas->drawImage(starImage, -50.0f * state.fWidthScale, -50.0f * state.fHeightScale);
+#else
         canvas->drawImage(starImage, -50.0f, -50.0f);
+#endif
         canvas->restore();
 
         auto dContext = GrAsDirectContext(canvas->recordingContext());
