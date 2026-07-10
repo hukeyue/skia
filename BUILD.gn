@@ -1025,9 +1025,17 @@ optional("gpu") {
     } else if (is_ios) {
       sources += [ "src/gpu/ganesh/gl/iOS/GrGLMakeNativeInterface_iOS.cpp" ]
     } else if (is_win && !skia_enable_winuwp) {
-      sources += [ "src/gpu/ganesh/gl/win/GrGLMakeNativeInterface_win.cpp" ]
-      if (target_cpu != "arm64") {
-        libs += [ "OpenGL32.lib" ]
+      if (!skia_use_angle) {
+        sources += [ "src/gpu/ganesh/gl/win/GrGLMakeNativeInterface_win.cpp" ]
+        if (target_cpu != "arm64") {
+          libs += [ "OpenGL32.lib" ]
+        }
+      } else {
+        deps += [ "//third_party/angle2" ]
+        sources += [
+          "src/gpu/ganesh/gl/egl/GrGLMakeEGLInterface.cpp",
+          "src/gpu/ganesh/gl/egl/GrGLMakeNativeInterface_egl.cpp",
+        ]
       }
     } else {
       sources += [ "src/gpu/ganesh/gl/GrGLMakeNativeInterface_none.cpp" ]
@@ -3058,6 +3066,9 @@ if (skia_enable_tools) {
         "//third_party/libsdl",
         "//third_party/libtsm",
       ]
+      if (skia_use_gl && skia_use_angle) {
+        deps += [ "//third_party/angle2" ]
+      }
     }
   }
 

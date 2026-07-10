@@ -18,6 +18,7 @@
 #include "include/gpu/ganesh/gl/GrGLBackendSurface.h"
 #include "include/gpu/ganesh/gl/GrGLDirectContext.h"
 #include "include/gpu/gl/GrGLInterface.h"
+#include "include/gpu/gl/egl/GrGLMakeEGLInterface.h"
 #include "include/gpu/gl/GrGLTypes.h"
 #include "src/gpu/ganesh/gl/GrGLUtil.h"
 
@@ -154,8 +155,13 @@ static SkCanvas* glGetCanvas(int dw, int dh, uint32_t windowFormat, int contextT
     glClearStencil(0);
     glClear(GL_COLOR_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
 
+#if defined(SK_BUILD_FOR_WIN) && defined(SK_ANGLE)
+    // setup GrContext
+    glState->glInterface = GrGLMakeEGLInterface();
+#else
     // setup GrContext
     glState->glInterface = GrGLMakeNativeInterface();
+#endif
     if (!glState->glInterface.get()) {
         SkDebugf("GrGLMakeNativeInterface Error\n");
         return nullptr;
@@ -1360,8 +1366,8 @@ static sk_sp<SkImage> draw_term_image(SkCanvas *canvas, ApplicationState *state,
 
 
 /* Used by atexit handler */
-static SDL_GLContext glContext;
-static SDL_Window* window;
+static SDL_Renderer* renderer = nullptr;
+static SDL_Window* window = nullptr;
 
 #ifdef SK_BUILD_FOR_WIN
 typedef std::pair<int, int> SkDPI;
@@ -1456,21 +1462,28 @@ int main(int argc, char** argv) {
     ::unsetenv("XMODIFIERS");
 #endif
 
-    uint32_t windowFlags = 0;
-
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
-
-    glContext = nullptr;
-#if defined(SK_BUILD_FOR_ANDROID) || defined(SK_BUILD_FOR_IOS)
-    // For Android/iOS we need to set up for OpenGL ES and we make the window hi res & full screen
+#if defined(SK_BUILD_FOR_ANDROID) || defined(SK_BUILD_FOR_IOS) || defined(SK_ANGLE)
+    // set up for OpenGL ES
+#if 0
+    SDL_SetHint(SDL_HINT_OPENGL_ES_DRIVER, "1");
+#else
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_EGL, 1);
+#endif
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
-    windowFlags = SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_BORDERLESS |
-                  SDL_WINDOW_FULLSCREEN_DESKTOP | SDL_WINDOW_ALLOW_HIGHDPI;
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 2);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
 #else
     // For all other clients we use the core profile and operate in a window
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
+#endif
 
+    uint32_t windowFlags = 0;
+#if defined(SK_BUILD_FOR_ANDROID) || defined(SK_BUILD_FOR_IOS)
+    windowFlags = SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_BORDERLESS |
+                  SDL_WINDOW_FULLSCREEN_DESKTOP | SDL_WINDOW_ALLOW_HIGHDPI;
+#else
     windowFlags = SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE;
 #endif
     static const int kStencilBits = 8;  // Skia needs 8 stencil bits
@@ -1487,6 +1500,9 @@ int main(int argc, char** argv) {
     static const int kMsaaSampleCount = 0;  // 4;
     // SDL_GL_SetAttribute(SDL_GL_MULTISAMPLEBUFFERS, 1);
     // SDL_GL_SetAttribute(SDL_GL_MULTISAMPLESAMPLES, kMsaaSampleCount);
+
+    ApplicationState state {};
+    gState = &state;
 
 #ifdef SK_BUILD_FOR_WIN
     // It's currently possible to set DPI awareness programmatically on Windows,
@@ -1519,6 +1535,12 @@ int main(int argc, char** argv) {
     SkDebugf("DPI x: %d y: %d\n", dpi.first, dpi.second);
 #endif
 
+#if 1
+#if defined(SK_BUILD_FOR_WIN) && defined(SK_ANGLE)
+    SDL_SetHint(SDL_HINT_RENDER_DRIVER, "opengles2");
+#endif
+#endif
+
     /*
      * In a real application you might want to initialize more subsystems
      */
@@ -1526,10 +1548,7 @@ int main(int argc, char** argv) {
         handle_sdl_error();
         return 1;
     }
-
-    ApplicationState state {};
-    gState = &state;
-
+    SkDebugf("sdl video driver: %s\n", SDL_GetCurrentVideoDriver());
 #ifdef SK_BUILD_FOR_WIN
     gState->fWidthScale = 96.0 / dpi.first;
     gState->fHeightScale = 96.0 / dpi.second;
@@ -1575,24 +1594,23 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+#if defined(SK_BUILD_FOR_ANDROID) || defined(SK_BUILD_FOR_IOS)
     // To go fullscreen
     // SDL_SetWindowFullscreen(window, SDL_WINDOW_FULLSCREEN);
-
+#else
     // Enable Resizable
     SDL_SetWindowResizable(window, SDL_TRUE);
+#endif
 
     // try and setup a GL context
-    glContext = SDL_GL_CreateContext(window);
-    if (!glContext) {
+    renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+    if (!renderer) {
         handle_sdl_error();
         return 1;
     }
-
-    int success = SDL_GL_MakeCurrent(window, glContext);
-    if (success != 0) {
-        handle_sdl_error();
-        return success;
-    }
+    SDL_RendererInfo info;
+    SDL_GetRendererInfo(renderer, &info);
+    SDL_Log("sdl Current Render Driver: %s\n", info.name);
 
     uint32_t windowFormat = SDL_GetWindowPixelFormat(window);
     int contextType;
@@ -1741,12 +1759,15 @@ redraw_queued:
     close_conpty(vte_ctx.fd);
 
     std::atexit([]() {
-        if (glContext) {
-            SDL_GL_DeleteContext(glContext);
+        // Remove renderer
+        if (renderer) {
+            SDL_DestroyRenderer(renderer);
         }
 
         // Destroy window
-        SDL_DestroyWindow(window);
+        if (window) {
+            SDL_DestroyWindow(window);
+        }
 
         // Quit SDL subsystems
         SDL_Quit();
