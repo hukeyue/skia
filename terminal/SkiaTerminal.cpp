@@ -96,6 +96,11 @@ typedef int socket_t;
 constexpr socket_t invalid_socket_t = -1;
 #endif
 
+#ifdef SK_BUILD_FOR_WIN
+typedef std::pair<int, int> SkDPI;
+static HRESULT retrieveDPI(SkDPI *dpi, RECT *rect = nullptr);
+#endif
+
 struct ApplicationState;
 
 static bool resize_conpty(int ws_row, int ws_col, socket_t fd, ApplicationState *state);
@@ -109,7 +114,7 @@ static bool resize_conpty(int ws_row, int ws_col, socket_t fd, ApplicationState 
  */
 
 struct ApplicationState {
-    ApplicationState() : fQuit(false), fFontSize(12.0), fFontAdvanceWidth(), fFontSpacing() {}
+    ApplicationState() : fQuit(false), fFontSize(12.0), fOFontSize(12.0), fFontAdvanceWidth(), fFontSpacing() {}
     // Storage for the user created rectangles. The last one may still be being edited.
     std::vector<SkRect> fRects;
     std::atomic_bool fQuit;
@@ -117,6 +122,7 @@ struct ApplicationState {
     bool fRedrawQueued = false;
     uint32_t fRedrawTimerId = 0x0;
     float fFontSize;
+    float fOFontSize;
     float fFontAdvanceWidth;
     float fFontSpacing;
     double fWidthScale;
@@ -232,6 +238,34 @@ static void handle_size_change(ApplicationState* state, SDL_Window* window, SkCa
 
     SDL_GetWindowSize(window, &state->fDm.w, &state->fDm.h);
     SkDebugf("window: width %d height %d\n", state->fDm.w, state->fDm.h);
+
+    int x, y;
+    SDL_GetWindowPosition(window, &x, &y);
+    SkDebugf("window: pos x %d y %d\n", x, y);
+
+#ifdef SK_BUILD_FOR_WIN
+    SkDPI dpi;
+    RECT r;
+    r.left = x;
+    r.top = y;
+    r.right = x + 1;
+    r.bottom = y + 1;
+    HRESULT hr = retrieveDPI(&dpi, &r);
+    if (FAILED(hr)) {
+        SkDebugf("retrieveDPI(): %s\n",
+                 std::system_category().message(hr).c_str());
+    }
+    SkDebugf("DPI x: %d y: %d\n", dpi.first, dpi.second);
+
+    state->fWidthScale = dpi.first / 96.0;
+    state->fHeightScale = dpi.second / 96.0;
+    state->fFontSize = state->fOFontSize * state->fWidthScale; // FIXME
+
+    SkDebugf("resize: font size %.1f\n", state->fFontSize);
+
+    state->fDm.w /= state->fWidthScale;
+    state->fDm.h /= state->fHeightScale;
+#endif
 
     SDL_GL_GetDrawableSize(window, &dw, &dh);
     SkDebugf("gl: width %d height %d\n", dw, dh);
@@ -1437,10 +1471,10 @@ static bool iterateMonitor(HMONITOR hMonitor, HDC /*hdc*/, LPRECT /*rect*/, LPAR
     return true;
 }
 
-static HRESULT retrieveDPI(SkDPI *dpi)
+static HRESULT retrieveDPI(SkDPI *dpi, RECT *rect)
 {
     HRESULT hr = S_OK;
-    BOOL result = ::EnumDisplayMonitors(nullptr, nullptr,
+    BOOL result = ::EnumDisplayMonitors(nullptr, rect,
         (MONITORENUMPROC)(void*)iterateMonitor, (LPARAM)dpi);
     if (!result) {
         hr = HRESULT_FROM_WIN32(GetLastError());
@@ -1527,7 +1561,7 @@ int main(int argc, char** argv) {
     }
 #endif
     SkDPI dpi;
-    hr = retrieveDPI(&dpi);
+    hr = retrieveDPI(&dpi, nullptr);
     if (FAILED(hr)) {
         SkDebugf("retrieveDPI(): %s\n",
                  std::system_category().message(hr).c_str());
@@ -1550,9 +1584,9 @@ int main(int argc, char** argv) {
     }
     SkDebugf("sdl video driver: %s\n", SDL_GetCurrentVideoDriver());
 #ifdef SK_BUILD_FOR_WIN
-    gState->fWidthScale = 96.0 / dpi.first;
-    gState->fHeightScale = 96.0 / dpi.second;
-    gState->fFontSize = gState->fFontSize / gState->fWidthScale;
+    gState->fWidthScale = dpi.first / 96.0;
+    gState->fHeightScale = dpi.second / 96.0;
+    gState->fFontSize = gState->fFontSize * gState->fWidthScale;
 #else
     gState->fWidthScale = gState->fHeightScale = 1.00;
 #endif
@@ -1576,6 +1610,7 @@ int main(int argc, char** argv) {
         handle_sdl_error();
         return 1;
     }
+    SkDebugf("display: width %d height %d\n", state.fDm.w, state.fDm.h);
 
     // SkASSERT(typeface->isFixedPitch());
     state.fFontAdvanceWidth = gFont->measureText("X", 1U, SkTextEncoding::kUTF8, nullptr);
@@ -1584,8 +1619,8 @@ int main(int argc, char** argv) {
     SkDebugf("default: cell width %f col %f\n", state.fFontAdvanceWidth, state.fFontSize + state.fFontSpacing);
     SkDebugf("default: row %d col %d\n", DEFAULT_ROW, DEFAULT_COL);
     SkDebugf("default: font size %.1f\n", state.fFontSize);
-    state.fDm.w = std::max<float>(state.fDm.w * 0.25f, state.fFontAdvanceWidth * DEFAULT_ROW);
-    state.fDm.h = std::max<float>(state.fDm.h * 0.25f, (state.fFontSize + state.fFontSpacing) * DEFAULT_COL - state.fFontSpacing);
+    state.fDm.w = std::max<float>(state.fDm.w * 0.25f, state.fFontAdvanceWidth * DEFAULT_ROW) * state.fWidthScale;
+    state.fDm.h = std::max<float>(state.fDm.h * 0.25f, (state.fFontSize + state.fFontSpacing) * DEFAULT_COL - state.fFontSpacing) * state.fHeightScale;
 
     window = SDL_CreateWindow("SkTerminal", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, state.fDm.w, state.fDm.h, windowFlags);
 
@@ -1610,11 +1645,26 @@ int main(int argc, char** argv) {
     }
     SDL_RendererInfo info;
     SDL_GetRendererInfo(renderer, &info);
-    SDL_Log("sdl Current Render Driver: %s\n", info.name);
+    SDL_Log("Current Render Driver: %s\n", info.name);
+
+#if 0
+    const char* vendorStr = reinterpret_cast<const char*>(glGetString(GR_GL_VENDOR));
+    SkDebugf("Current GL Vendor: %s\n", vendorStr);
+    const char* renderStr = reinterpret_cast<const char*>(glGetString(GR_GL_RENDERER));
+    SkDebugf("Current GL Render: %s\n", renderStr);
+    const char* verStr = reinterpret_cast<const char*>(glGetString(GR_GL_VERSION));
+    SkDebugf("Current GL Version: %s\n", verStr);
+#endif
 
     uint32_t windowFormat = SDL_GetWindowPixelFormat(window);
     int contextType;
     SDL_GL_GetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, &contextType);
+
+    if (contextType == SDL_GL_CONTEXT_PROFILE_ES) {
+        SkDebugf("sdl2: opengles context\n");
+    } else {
+        SkDebugf("sdl2: opengl context\n");
+    }
 
     SDL_GetWindowDisplayMode(window, &state.fDm);
     SkDebugf("window: refresh rate %d\n", state.fDm.refresh_rate);
@@ -1622,10 +1672,39 @@ int main(int argc, char** argv) {
     if (state.fDm.refresh_rate == 0)
       state.fDm.refresh_rate = 60;
 
-    SDL_GetWindowSize(window, &state.fDm.w, &state.fDm.h);
+    int dw = state.fDm.w, dh = state.fDm.h;
+
+    SDL_GetWindowSize(window, &state.fDm.w, &state.fDm.h); // inaccurate with windows
+#ifdef SK_BUILD_FOR_WIN
+    state.fDm.w /= state.fWidthScale;
+    state.fDm.h /= state.fHeightScale;
+#endif
     SkDebugf("window: width %d height %d\n", state.fDm.w, state.fDm.h);
 
-    int dw, dh;
+    int x, y;
+    SDL_GetWindowPosition(window, &x, &y);
+    SkDebugf("window: pos x %d y %d\n", x, y);
+
+#ifdef SK_BUILD_FOR_WIN
+    RECT r;
+    r.left = x;
+    r.top = y;
+    r.right = x + 1;
+    r.bottom = y + 1;
+    hr = retrieveDPI(&dpi, &r);
+    if (FAILED(hr)) {
+        SkDebugf("retrieveDPI(): %s\n",
+                 std::system_category().message(hr).c_str());
+    }
+    SkDebugf("DPI x: %d y: %d\n", dpi.first, dpi.second);
+
+    state.fWidthScale = dpi.first / 96.0;
+    state.fHeightScale = dpi.second / 96.0;
+    state.fFontSize = state.fOFontSize * state.fWidthScale; // FIXME
+
+    SkDebugf("resize: font size %.1f\n", state.fFontSize);
+#endif
+
     SDL_GL_GetDrawableSize(window, &dw, &dh);
     SkDebugf("gl: width %d height %d\n", dw, dh);
 
