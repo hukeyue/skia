@@ -1779,6 +1779,8 @@ int main(int argc, char** argv) {
 
     int x, y;
     SDL_GetWindowPosition(window, &x, &y);
+    x = std::max(x, 0);
+    y = std::max(y, 0);
     SkDebugf("window: pos x %d y %d\n", x, y);
 
 #ifdef SK_BUILD_FOR_WIN
