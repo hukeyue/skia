@@ -1614,6 +1614,7 @@ int main(int argc, char** argv) {
 #if defined(SK_BUILD_FOR_WIN) && defined(SK_ANGLE)
 #if 0
     SDL_SetHint(SDL_HINT_OPENGL_ES_DRIVER, "1");
+    SDL_SetHint(SDL_HINT_VIDEO_FORCE_EGL, "1"); // see https://github.com/libsdl-org/sdl/issues/15031
 #else
     SDL_SetHint(SDL_HINT_RENDER_DRIVER, "opengles2");
 #endif
@@ -1743,11 +1744,12 @@ int main(int argc, char** argv) {
 #endif
 
 #if 0
-    const char* vendorStr = reinterpret_cast<const char*>(glGetString(GR_GL_VENDOR));
+    auto pfnGlGetString = (decltype(&glGetString))SDL_GL_GetProcAddress("glGetString");
+    const char* vendorStr = reinterpret_cast<const char*>(pfnGlGetString(GR_GL_VENDOR));
     SkDebugf("Current GL Vendor: %s\n", vendorStr);
-    const char* renderStr = reinterpret_cast<const char*>(glGetString(GR_GL_RENDERER));
+    const char* renderStr = reinterpret_cast<const char*>(pfnGlGetString(GR_GL_RENDERER));
     SkDebugf("Current GL Render: %s\n", renderStr);
-    const char* verStr = reinterpret_cast<const char*>(glGetString(GR_GL_VERSION));
+    const char* verStr = reinterpret_cast<const char*>(pfnGlGetString(GR_GL_VERSION));
     SkDebugf("Current GL Version: %s\n", verStr);
 #endif
 
