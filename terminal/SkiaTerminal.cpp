@@ -121,7 +121,7 @@ static bool resize_conpty(int ws_row, int ws_col, socket_t fd, ApplicationState 
  */
 
 struct ApplicationState {
-    ApplicationState() : fQuit(false), fFontSize(12.0), fOFontSize(12.0), fFontAdvanceWidth(), fFontSpacing() {}
+    ApplicationState() : fQuit(false), fFontSize(12.0), fFontAdvanceWidth(), fFontSpacing() {}
     // Storage for the user created rectangles. The last one may still be being edited.
     std::vector<SkRect> fRects;
     std::atomic_bool fQuit;
@@ -129,7 +129,6 @@ struct ApplicationState {
     bool fRedrawQueued = false;
     uint32_t fRedrawTimerId = 0x0;
     float fFontSize;
-    float fOFontSize;
     float fFontAdvanceWidth;
     float fFontSpacing;
     double fWidthScale;
@@ -257,6 +256,8 @@ static void handle_size_change(ApplicationState* state, SDL_Window* window, SkCa
 
     int x, y;
     SDL_GetWindowPosition(window, &x, &y);
+    x = std::max(x, 0);
+    y = std::max(y, 0);
     SkDebugf("window: pos x %d y %d\n", x, y);
 
 #ifdef SK_BUILD_FOR_WIN
@@ -275,7 +276,6 @@ static void handle_size_change(ApplicationState* state, SDL_Window* window, SkCa
 
     state->fWidthScale = dpi.first / 96.0;
     state->fHeightScale = dpi.second / 96.0;
-    state->fFontSize = state->fOFontSize * state->fWidthScale; // FIXME
 
     SkDebugf("resize: font size %.1f\n", state->fFontSize);
 
@@ -298,11 +298,7 @@ static void handle_size_change(ApplicationState* state, SDL_Window* window, SkCa
     SDL_GL_GetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, &contextType);
 
     *canvas = glGetCanvas(dw, dh, windowFormat, contextType, state->fWidthScale, state->fHeightScale);
-#ifdef SK_BUILD_FOR_WIN
-    *starImage = draw_star_image(*canvas, 50.0f * state->fWidthScale);
-#else
     *starImage = draw_star_image(*canvas, 50.0f);
-#endif
     (*canvas)->clear(term_get_default_bc());
 
     state->fFontAdvanceWidth = gFont->measureText("X", 1U, SkTextEncoding::kUTF8, nullptr);
@@ -1631,7 +1627,7 @@ int main(int argc, char** argv) {
 #ifdef SK_BUILD_FOR_WIN
     gState->fWidthScale = dpi.first / 96.0;
     gState->fHeightScale = dpi.second / 96.0;
-    gState->fFontSize = gState->fFontSize * gState->fWidthScale;
+    gState->fFontSize = gState->fFontSize;
 #else
     gState->fWidthScale = gState->fHeightScale = 1.00;
 #endif
@@ -1651,11 +1647,13 @@ int main(int argc, char** argv) {
 
     // Setup window
     // This code will create a window with the same resolution as the user's desktop.
-    if (SDL_GetDesktopDisplayMode(0, &state.fDm) != 0) {
+    SDL_DisplayMode dm;
+    if (SDL_GetDesktopDisplayMode(0, &dm) != 0) {
         handle_sdl_error();
         return 1;
     }
-    SkDebugf("display: width %d height %d\n", state.fDm.w, state.fDm.h);
+    state.fDm = dm;
+    SkDebugf("display: width %d height %d\n", dm.w, dm.h);
 
     // SkASSERT(typeface->isFixedPitch());
     state.fFontAdvanceWidth = gFont->measureText("X", 1U, SkTextEncoding::kUTF8, nullptr);
@@ -1705,8 +1703,9 @@ int main(int argc, char** argv) {
     // SDL_GL_SetAttribute(SDL_GL_MULTISAMPLEBUFFERS, 1);
     // SDL_GL_SetAttribute(SDL_GL_MULTISAMPLESAMPLES, kMsaaSampleCount);
 
-
-    window = SDL_CreateWindow("SkTerminal", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, state.fDm.w, state.fDm.h, windowFlags);
+    int posx = (dm.w - state.fDm.w) / 2.0f;
+    int posy = (dm.h - state.fDm.h) / 2.0f;
+    window = SDL_CreateWindow("SkTerminal", posx, posy, state.fDm.w, state.fDm.h, windowFlags);
 
     if (!window) {
         handle_sdl_error();
@@ -1797,7 +1796,6 @@ int main(int argc, char** argv) {
 
     state.fWidthScale = dpi.first / 96.0;
     state.fHeightScale = dpi.second / 96.0;
-    state.fFontSize = state.fOFontSize * state.fWidthScale; // FIXME
 
     SkDebugf("resize: font size %.1f\n", state.fFontSize);
 #endif
@@ -1820,11 +1818,7 @@ int main(int argc, char** argv) {
         return -1;
     }
 
-#ifdef SK_BUILD_FOR_WIN
-    sk_sp<SkImage> starImage = draw_star_image(canvas, 50.0f * state.fWidthScale);
-#else
     sk_sp<SkImage> starImage = draw_star_image(canvas, 50.0f);
-#endif
     sk_sp<SkImage> termImage;
 
     TsmVteCtx vte_ctx { &state, invalid_socket_t };
@@ -1916,11 +1910,7 @@ redraw_queued:
         canvas->save();
         canvas->translate(state.fDm.w / 2.0 , state.fDm.h / 2.0);
         canvas->rotate(rotation++);
-#ifdef SK_BUILD_FOR_WIN
-        canvas->drawImage(starImage, -50.0f * state.fWidthScale, -50.0f * state.fHeightScale);
-#else
         canvas->drawImage(starImage, -50.0f, -50.0f);
-#endif
         canvas->restore();
 
         auto dContext = GrAsDirectContext(canvas->recordingContext());
