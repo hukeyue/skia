@@ -33,7 +33,11 @@
 #elif defined(SK_BUILD_FOR_WIN)
 #include <windows.h>
 #include <shellscalingapi.h>
+#if defined(SK_ANGLE)
+#include <GLES2/gl2.h>
+#else
 #include <GL/gl.h>
+#endif
 #endif
 
 #if defined(SK_BUILD_FOR_WIN)
@@ -100,6 +104,9 @@ constexpr socket_t invalid_socket_t = -1;
 typedef std::pair<int, int> SkDPI;
 static HRESULT retrieveDPI(SkDPI *dpi, RECT *rect = nullptr);
 #endif
+
+static SkColor term_get_default_fc();
+static SkColor term_get_default_bc();
 
 struct ApplicationState;
 
@@ -289,7 +296,7 @@ static void handle_size_change(ApplicationState* state, SDL_Window* window, SkCa
 #else
     *starImage = draw_star_image(*canvas, 50.0f);
 #endif
-    (*canvas)->clear(SkColorSetARGB(0xff, 253, 246, 227));
+    (*canvas)->clear(term_get_default_bc());
 
     state->fFontAdvanceWidth = gFont->measureText("X", 1U, SkTextEncoding::kUTF8, nullptr);
     state->fFontSpacing = std::min(1.0f, gFont->getSpacing());
@@ -1245,7 +1252,7 @@ enum vte_color_palette_t {
   t_vte_color_palette_solarized_black,
   t_vte_color_palette_solarized_white,
 };
-void vte_color_palette_set_type(vte_color_palette_t t) {
+static void vte_color_palette_set_type(vte_color_palette_t t) {
   switch(t) {
     default:
     case t_vte_color_palette:
@@ -1261,6 +1268,19 @@ void vte_color_palette_set_type(vte_color_palette_t t) {
       VTE_COLOR_palette_in_runtime = &VTE_COLOR_palette_solarized_white;
       break;
   }
+}
+
+static SkColor term_get_default_fc() {
+  uint8_t fr, fg, fb;
+  uint8_t code;
+
+  code = VTE_COLOR_FOREGROUND;
+
+  fr = (*VTE_COLOR_palette_in_runtime)[code][0];
+  fg = (*VTE_COLOR_palette_in_runtime)[code][1];
+  fb = (*VTE_COLOR_palette_in_runtime)[code][2];
+
+  return SkColorSetARGB(0xFF, fr, fg, fb);
 }
 
 static SkColor term_get_fc_from_attr(const struct tsm_screen_attr* attr) {
@@ -1294,6 +1314,19 @@ static SkColor term_get_bc_from_attr(const struct tsm_screen_attr* attr) {
         bg = (*VTE_COLOR_palette_in_runtime)[code][1];
         bb = (*VTE_COLOR_palette_in_runtime)[code][2];
     }
+
+    return SkColorSetARGB(0xFF, br, bg, bb);
+}
+
+static SkColor term_get_default_bc() {
+    uint8_t br, bg, bb;
+    uint8_t code;
+
+    code = VTE_COLOR_BACKGROUND;
+
+    br = (*VTE_COLOR_palette_in_runtime)[code][0];
+    bg = (*VTE_COLOR_palette_in_runtime)[code][1];
+    bb = (*VTE_COLOR_palette_in_runtime)[code][2];
 
     return SkColorSetARGB(0xFF, br, bg, bb);
 }
@@ -1790,7 +1823,7 @@ int main(int argc, char** argv) {
     while (!state.fQuit) {  // Our application loop
         state.fRedraw = false;
 
-        canvas->clear(SkColorSetARGB(0xff, 253, 246, 227));
+        canvas->clear(term_get_default_bc());
         handle_sdl_events(&state, window, &canvas, &starImage, vte_ctx.fd, screen, vte);
 
         long ret = -1;
