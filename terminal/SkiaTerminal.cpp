@@ -1149,8 +1149,9 @@ enum vte_color {
     VTE_COLOR_NUM
 };
 
-#if 0
-static uint8_t VTE_COLOR_palette[VTE_COLOR_NUM][3] = {
+typedef uint8_t VTE_COLOR_palette_t[VTE_COLOR_NUM][3];
+
+static VTE_COLOR_palette_t VTE_COLOR_palette = {
         {0, 0, 0},             /* black */
         {205, 0, 0},           /* red */
         {0, 205, 0},           /* green */
@@ -1171,7 +1172,7 @@ static uint8_t VTE_COLOR_palette[VTE_COLOR_NUM][3] = {
         {229, 229, 229},       /* light grey */
         {0, 0, 0},             /* black */
 };
-static uint8_t VTE_COLOR_palette_solarized[VTE_COLOR_NUM][3] = {
+static VTE_COLOR_palette_t VTE_COLOR_palette_solarized = {
         [VTE_COLOR_BLACK] = {7, 54, 66},             /* black */
         [VTE_COLOR_RED] = {220, 50, 47},             /* red */
         [VTE_COLOR_GREEN] = {133, 153, 0},           /* green */
@@ -1193,7 +1194,7 @@ static uint8_t VTE_COLOR_palette_solarized[VTE_COLOR_NUM][3] = {
         [VTE_COLOR_BACKGROUND] = {7, 54, 66},     /* black */
 };
 
-static uint8_t VTE_COLOR_palette_solarized_black[VTE_COLOR_NUM][3] = {
+static VTE_COLOR_palette_t VTE_COLOR_palette_solarized_black = {
         [VTE_COLOR_BLACK] = {0, 0, 0},               /* black */
         [VTE_COLOR_RED] = {220, 50, 47},             /* red */
         [VTE_COLOR_GREEN] = {133, 153, 0},           /* green */
@@ -1214,8 +1215,7 @@ static uint8_t VTE_COLOR_palette_solarized_black[VTE_COLOR_NUM][3] = {
         [VTE_COLOR_FOREGROUND] = {238, 232, 213}, /* light grey */
         [VTE_COLOR_BACKGROUND] = {0, 0, 0},       /* black */
 };
-#endif
-static uint8_t VTE_COLOR_palette_solarized_white[VTE_COLOR_NUM][3] = {
+static VTE_COLOR_palette_t VTE_COLOR_palette_solarized_white = {
         [VTE_COLOR_BLACK] = {7, 54, 66},             /* black */
         [VTE_COLOR_RED] = {220, 50, 47},             /* red */
         [VTE_COLOR_GREEN] = {133, 153, 0},           /* green */
@@ -1237,6 +1237,32 @@ static uint8_t VTE_COLOR_palette_solarized_white[VTE_COLOR_NUM][3] = {
         [VTE_COLOR_BACKGROUND] = {238, 232, 213}, /* light grey */
 };
 
+static VTE_COLOR_palette_t *VTE_COLOR_palette_in_runtime = &VTE_COLOR_palette;
+
+enum vte_color_palette_t {
+  t_vte_color_palette = 0x0,
+  t_vte_color_palette_solarized,
+  t_vte_color_palette_solarized_black,
+  t_vte_color_palette_solarized_white,
+};
+void vte_color_palette_set_type(vte_color_palette_t t) {
+  switch(t) {
+    default:
+    case t_vte_color_palette:
+      VTE_COLOR_palette_in_runtime = &VTE_COLOR_palette;
+      break;
+    case t_vte_color_palette_solarized:
+      VTE_COLOR_palette_in_runtime = &VTE_COLOR_palette_solarized;
+      break;
+    case t_vte_color_palette_solarized_black:
+      VTE_COLOR_palette_in_runtime = &VTE_COLOR_palette_solarized_black;
+      break;
+    case t_vte_color_palette_solarized_white:
+      VTE_COLOR_palette_in_runtime = &VTE_COLOR_palette_solarized_white;
+      break;
+  }
+}
+
 static SkColor term_get_fc_from_attr(const struct tsm_screen_attr* attr) {
     uint8_t fr = attr->fr, fg = attr->fg, fb = attr->fb;
 
@@ -1247,9 +1273,9 @@ static SkColor term_get_fc_from_attr(const struct tsm_screen_attr* attr) {
 
         if (code >= VTE_COLOR_NUM) code = VTE_COLOR_FOREGROUND;
 
-        fr = VTE_COLOR_palette_solarized_white[code][0];
-        fg = VTE_COLOR_palette_solarized_white[code][1];
-        fb = VTE_COLOR_palette_solarized_white[code][2];
+        fr = (*VTE_COLOR_palette_in_runtime)[code][0];
+        fg = (*VTE_COLOR_palette_in_runtime)[code][1];
+        fb = (*VTE_COLOR_palette_in_runtime)[code][2];
     }
 
     return SkColorSetARGB(0xFF, fr, fg, fb);
@@ -1264,9 +1290,9 @@ static SkColor term_get_bc_from_attr(const struct tsm_screen_attr* attr) {
 
         if (code >= VTE_COLOR_NUM) code = VTE_COLOR_BACKGROUND;
 
-        br = VTE_COLOR_palette_solarized_white[code][0];
-        bg = VTE_COLOR_palette_solarized_white[code][1];
-        bb = VTE_COLOR_palette_solarized_white[code][2];
+        br = (*VTE_COLOR_palette_in_runtime)[code][0];
+        bg = (*VTE_COLOR_palette_in_runtime)[code][1];
+        bb = (*VTE_COLOR_palette_in_runtime)[code][2];
     }
 
     return SkColorSetARGB(0xFF, br, bg, bb);
@@ -1757,6 +1783,7 @@ int main(int argc, char** argv) {
     tsm_screen_resize(screen, ws_row, ws_col);
 
     tsm_vte_new(&vte, screen, term_write_cb, &vte_ctx, log_tsm, screen);
+    vte_color_palette_set_type(t_vte_color_palette_solarized_white);
 
     int rotation = 0;
 
