@@ -162,7 +162,8 @@ static SkFont *gFont, *gFontBold;
 static ApplicationState *gState;
 static GLState *glState;
 
-static SkCanvas* glGetCanvas(int dw, int dh, uint32_t windowFormat, int contextType, double widthScale, double heightScale) {
+static SkCanvas* glGetCanvas(int dw, int dh, uint32_t windowFormat, int contextType,
+                             double widthScale, double heightScale) {
     glViewport(0, 0, dw, dh);
     glClearColor(1, 1, 1, 1);
     glClearStencil(0);
@@ -210,9 +211,15 @@ static SkCanvas* glGetCanvas(int dw, int dh, uint32_t windowFormat, int contextT
         }
     }
 
-    static const int kMsaaSampleCount = 0;  // 4;
-    static const int kStencilBits = 8;  // Skia needs 8 stencil bits
-    auto target = GrBackendRenderTargets::MakeGL(dw, dh, kMsaaSampleCount, kStencilBits, info);
+    int msaaSampleCount;
+    SDL_GL_GetAttribute(SDL_GL_MULTISAMPLESAMPLES, &msaaSampleCount);
+    SkDebugf("msaaSampleCount %d\n", msaaSampleCount);
+
+    int stencilBits;
+    SDL_GL_GetAttribute(SDL_GL_STENCIL_SIZE, &stencilBits);
+    SkDebugf("stencilBits %d\n", stencilBits);
+
+    auto target = GrBackendRenderTargets::MakeGL(dw, dh, msaaSampleCount, stencilBits, info);
 
     // setup SkSurface
     // To use distance field text, use commented out SkSurfaceProps instead
@@ -538,7 +545,8 @@ struct listen_ctx {
 
 static listen_ctx *gListenCtx;
 
-HRESULT WriteFileN(HANDLE hFile, LPCVOID lpBuffer, DWORD nNumberOfBytesToWrite, LPDWORD lpNumberOfBytesWritten, LPOVERLAPPED lpOverlapped) {
+HRESULT WriteFileN(HANDLE hFile, LPCVOID lpBuffer, DWORD nNumberOfBytesToWrite, LPDWORD lpNumberOfBytesWritten,
+                   LPOVERLAPPED lpOverlapped) {
     DWORD numberOfBytesWritten;
     HRESULT hr = S_OK;
     *lpNumberOfBytesWritten = 0;
@@ -1033,8 +1041,8 @@ static SkPath create_star(float r) {
 #define KMSG_LINE_MAX (1024 - 32)
 
 static __attribute__((__format__(__printf__, 7, 0)))
-void log_tsm(void* data, const char* file, int line, const char* fn, const char* subs,
-                    unsigned int sev, const char* format, va_list args) {
+void log_tsm(void* data, const char* file, int line, const char* fn,
+             const char* subs, unsigned int sev, const char* format, va_list args) {
     char buffer[KMSG_LINE_MAX];
     int len = snprintf(buffer, KMSG_LINE_MAX, "<%ui>sdl[%d]: %s: ", sev, getpid(), subs);
     if (len < 0) return;
@@ -1465,7 +1473,11 @@ static sk_sp<SkImage> draw_term_image(SkCanvas *canvas, ApplicationState *state,
 
 
 /* Used by atexit handler */
+#if 1
+static SDL_GLContext glContext = nullptr;
+#else
 static SDL_Renderer* renderer = nullptr;
+#endif
 static SDL_Window* window = nullptr;
 
 #ifdef SK_BUILD_FOR_WIN
@@ -1561,47 +1573,7 @@ int main(int argc, char** argv) {
     ::unsetenv("XMODIFIERS");
 #endif
 
-#if defined(SK_BUILD_FOR_ANDROID) || defined(SK_BUILD_FOR_IOS) || defined(SK_ANGLE)
-    // set up for OpenGL ES
-#if 0
-    SDL_SetHint(SDL_HINT_OPENGL_ES_DRIVER, "1");
-#else
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_EGL, 1);
-#endif
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 2);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
-#else
-    // For all other clients we use the core profile and operate in a window
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
-#endif
-
-    uint32_t windowFlags = 0;
-#if defined(SK_BUILD_FOR_ANDROID) || defined(SK_BUILD_FOR_IOS)
-    windowFlags = SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_BORDERLESS |
-                  SDL_WINDOW_FULLSCREEN_DESKTOP | SDL_WINDOW_ALLOW_HIGHDPI;
-#else
-    windowFlags = SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE;
-#endif
-    static const int kStencilBits = 8;  // Skia needs 8 stencil bits
-    SDL_GL_SetAttribute(SDL_GL_RED_SIZE, 8);
-    SDL_GL_SetAttribute(SDL_GL_GREEN_SIZE, 8);
-    SDL_GL_SetAttribute(SDL_GL_BLUE_SIZE, 8);
-    SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
-    SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 0);
-    SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, kStencilBits);
-
-    SDL_GL_SetAttribute(SDL_GL_ACCELERATED_VISUAL, 1);
-
-    // If you want multisampling, uncomment the below lines and set a sample count
-    static const int kMsaaSampleCount = 0;  // 4;
-    // SDL_GL_SetAttribute(SDL_GL_MULTISAMPLEBUFFERS, 1);
-    // SDL_GL_SetAttribute(SDL_GL_MULTISAMPLESAMPLES, kMsaaSampleCount);
-
-    ApplicationState state {};
-    gState = &state;
+    SkDebugf("sdl video driver: %s\n", SDL_GetCurrentVideoDriver());
 
 #ifdef SK_BUILD_FOR_WIN
     // It's currently possible to set DPI awareness programmatically on Windows,
@@ -1634,8 +1606,15 @@ int main(int argc, char** argv) {
     SkDebugf("DPI x: %d y: %d\n", dpi.first, dpi.second);
 #endif
 
-#if 1
+    SkDebugf("sdl video driver: %s\n", SDL_GetCurrentVideoDriver());
+
+    ApplicationState state {};
+    gState = &state;
+
 #if defined(SK_BUILD_FOR_WIN) && defined(SK_ANGLE)
+#if 0
+    SDL_SetHint(SDL_HINT_OPENGL_ES_DRIVER, "1");
+#else
     SDL_SetHint(SDL_HINT_RENDER_DRIVER, "opengles2");
 #endif
 #endif
@@ -1687,6 +1666,45 @@ int main(int argc, char** argv) {
     state.fDm.w = std::max<float>(state.fDm.w * 0.25f, state.fFontAdvanceWidth * DEFAULT_ROW) * state.fWidthScale;
     state.fDm.h = std::max<float>(state.fDm.h * 0.25f, (state.fFontSize + state.fFontSpacing) * DEFAULT_COL - state.fFontSpacing) * state.fHeightScale;
 
+    uint32_t windowFlags = 0;
+#if defined(SK_BUILD_FOR_ANDROID) || defined(SK_BUILD_FOR_IOS)
+    windowFlags = SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_BORDERLESS |
+                  SDL_WINDOW_FULLSCREEN_DESKTOP | SDL_WINDOW_ALLOW_HIGHDPI;
+#else
+    windowFlags = SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE;
+#endif
+
+#if defined(SK_BUILD_FOR_ANDROID) || defined(SK_BUILD_FOR_IOS) || defined(SK_ANGLE)
+    // set up for OpenGL ES
+#if 1
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_EGL, 1);
+#endif
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 2);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
+#else
+    // For all other clients we use the core profile and operate in a window
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
+#endif
+
+    static const int kStencilBits = 8;  // Skia needs 8 stencil bits
+    SDL_GL_SetAttribute(SDL_GL_RED_SIZE, 8);
+    SDL_GL_SetAttribute(SDL_GL_GREEN_SIZE, 8);
+    SDL_GL_SetAttribute(SDL_GL_BLUE_SIZE, 8);
+    SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
+    SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 0);
+    SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, kStencilBits);
+
+    SDL_GL_SetAttribute(SDL_GL_ACCELERATED_VISUAL, 1);
+
+    // If you want multisampling, uncomment the below lines and set a sample count
+    static const int kMsaaSampleCount = 0;  // 4;
+    // SDL_GL_SetAttribute(SDL_GL_MULTISAMPLEBUFFERS, 1);
+    // SDL_GL_SetAttribute(SDL_GL_MULTISAMPLESAMPLES, kMsaaSampleCount);
+
+
     window = SDL_CreateWindow("SkTerminal", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, state.fDm.w, state.fDm.h, windowFlags);
 
     if (!window) {
@@ -1702,6 +1720,17 @@ int main(int argc, char** argv) {
     SDL_SetWindowResizable(window, SDL_TRUE);
 #endif
 
+#if 1
+    glContext = SDL_GL_CreateContext(window);
+    if (!glContext) {
+        handle_sdl_error();
+        return 1;
+    }
+    if (SDL_GL_MakeCurrent(window, glContext) != 0) {
+        handle_sdl_error();
+        return 1;
+    }
+#else
     // try and setup a GL context
     renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
     if (!renderer) {
@@ -1711,6 +1740,7 @@ int main(int argc, char** argv) {
     SDL_RendererInfo info;
     SDL_GetRendererInfo(renderer, &info);
     SDL_Log("Current Render Driver: %s\n", info.name);
+#endif
 
 #if 0
     const char* vendorStr = reinterpret_cast<const char*>(glGetString(GR_GL_VENDOR));
@@ -1912,10 +1942,17 @@ redraw_queued:
     close_conpty(vte_ctx.fd);
 
     std::atexit([]() {
+#if 1
+        // Destory glContext
+        if (glContext) {
+            SDL_GL_DeleteContext(glContext);
+        }
+#else
         // Remove renderer
         if (renderer) {
             SDL_DestroyRenderer(renderer);
         }
+#endif
 
         // Destroy window
         if (window) {
