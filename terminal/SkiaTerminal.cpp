@@ -163,11 +163,6 @@ static GLState *glState;
 
 static SkCanvas* glGetCanvas(int dw, int dh, uint32_t windowFormat, int contextType,
                              double widthScale, double heightScale) {
-    glViewport(0, 0, dw, dh);
-    glClearColor(1, 1, 1, 1);
-    glClearStencil(0);
-    glClear(GL_COLOR_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
-
 #if defined(SK_BUILD_FOR_WIN) && defined(SK_ANGLE)
     // setup GrContext
     glState->glInterface = GrGLMakeEGLInterface();
@@ -180,10 +175,16 @@ static SkCanvas* glGetCanvas(int dw, int dh, uint32_t windowFormat, int contextT
         return nullptr;
     }
 
+    glState->glInterface->fFunctions.fViewport(0, 0, dw, dh);
+    glState->glInterface->fFunctions.fClearColor(1, 1, 1, 1);
+    glState->glInterface->fFunctions.fClearStencil(0);
+    glState->glInterface->fFunctions.fClear(GL_COLOR_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+
     // setup contexts
     glState->grContext = GrDirectContexts::MakeGL(glState->glInterface, GrContextOptions());
     if (!glState->grContext.get()) {
         SkDebugf("GrDirectContexts::MakeGL Error\n");
+        glState->glInterface.reset();
         return nullptr;
     }
 
@@ -229,10 +230,19 @@ static SkCanvas* glGetCanvas(int dw, int dh, uint32_t windowFormat, int contextT
     glState->surface = (SkSurfaces::WrapBackendRenderTarget(glState->grContext.get(), target,
                                                             kBottomLeft_GrSurfaceOrigin,
                                                             colorType, nullptr, &props));
+    if (!glState->surface) {
+        SkDebugf("SkSurfaces::WrapBackendRenderTarget Error\n");
+        glState->grContext.reset();
+        glState->glInterface.reset();
+        return nullptr;
+    }
 
     SkCanvas* canvas = glState->surface->getCanvas();
     if (!canvas) {
-        SkDebugf("getCanvas Error\n");
+        SkDebugf("SkSurface::getCanvas Error\n");
+        glState->surface.reset();
+        glState->grContext.reset();
+        glState->glInterface.reset();
         return nullptr;
     }
     canvas->scale(widthScale, heightScale);
@@ -1955,6 +1965,14 @@ redraw_queued:
 
         // Quit SDL subsystems
         SDL_Quit();
+
+        // Cleanup glState At last
+        if (glState) {
+            glState->surface.reset();
+            glState->grContext.reset();
+            glState->glInterface.reset();
+        }
+
         SkDebugf("main thread exited\n");
     });
 
