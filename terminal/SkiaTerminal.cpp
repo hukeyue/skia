@@ -40,6 +40,8 @@
 #endif
 #endif
 
+#include <signal.h>
+
 #if defined(SK_BUILD_FOR_WIN)
 #include <winsock2.h>
 #ifndef EXTENDED_STARTUPINFO_PRESENT
@@ -125,9 +127,9 @@ struct ApplicationState {
     // Storage for the user created rectangles. The last one may still be being edited.
     std::vector<SkRect> fRects;
     std::atomic_bool fQuit;
-    bool fRedraw = false;
-    bool fRedrawQueued = false;
-    uint32_t fRedrawTimerId = 0x0;
+    std::atomic_bool fRedrawRequired = false;
+    std::atomic_bool fRedrawQueued = false;
+    std::atomic<uint32_t> fRedrawTimerId = 0x0;
     float fFontSize;
     float fFontAdvanceWidth;
     float fFontSpacing;
@@ -326,7 +328,7 @@ static void handle_size_change(ApplicationState* state, SDL_Window* window, SkCa
         return;
     }
     tsm_screen_resize(screen, ws_row, ws_col);
-    state->fRedraw = true;
+    state->fRedrawRequired = true;
 }
 
 static void handle_sdl_events(ApplicationState* state, SDL_Window* window, SkCanvas** canvas, sk_sp<SkImage>* starImage,
@@ -474,7 +476,7 @@ static void handle_sdl_events(ApplicationState* state, SDL_Window* window, SkCan
                     SkDebugf("sdl: key event %d\n", key);
                     tsm_screen_sb_reset(screen);
                 }
-                state->fRedraw = true;
+                state->fRedrawRequired = true;
                 break;
             }
             case SDL_WINDOWEVENT: {
@@ -1449,32 +1451,24 @@ static sk_sp<SkImage> draw_star_image(SkCanvas *canvas, float r) {
     return cpuSurface->makeImageSnapshot();
 }
 
-static sk_sp<SkImage> draw_term_image(SkCanvas *canvas, ApplicationState *state,
-                                      struct tsm_vte* vte, struct tsm_screen* screen) {
+static void draw_vte_screen(SkCanvas *canvas, ApplicationState *state, struct tsm_vte* vte, struct tsm_screen* screen) {
     SkPaint paint;
     paint.setAntiAlias(true);
-
-    sk_sp<SkSurface> cpuSurface(SkSurfaces::Raster(canvas->imageInfo()));
-    SkCanvas* offscreen = cpuSurface->getCanvas();
 
     struct tsm_screen_attr a;
     tsm_vte_get_def_attr(vte, &a);
     SkColor bc = term_get_bc_from_attr(&a);
 
-    offscreen->save();
-    offscreen->clear(bc);
-    // offscreen->clear(SK_ColorTRANSPARENT);
+    canvas->clear(bc);
+    // canvas->clear(SK_ColorTRANSPARENT);
 
-    struct draw_ctx draw_ctx = { offscreen, state, &paint, true };
+    struct draw_ctx draw_ctx = { canvas, state, &paint, true };
     // draw background
     tsm_screen_draw(screen, draw_cb, &draw_ctx);
 
     // draw frontground
     draw_ctx.bcOnly = false;
     tsm_screen_draw(screen, draw_cb, &draw_ctx);
-
-    offscreen->restore();
-    return cpuSurface->makeImageSnapshot();
 }
 
 
@@ -1616,6 +1610,24 @@ int main(int argc, char** argv) {
 
     ApplicationState state {};
     gState = &state;
+
+    // embraces interrupt signal
+    auto signal_handler = [](int sig) {
+        if (sig == SIGINT) {
+            gState->fQuit = true;
+        }
+    };
+    if (signal(SIGINT, signal_handler) != 0) {
+        SkDebugf("SIGINT handler was not enabled.");
+    }
+#ifndef SK_BUILD_FOR_WIN
+    if (signal(SIGPIPE, SIG_IGN) != 0) {
+        SkDebugf("SIGPIPE handler was not disabled properly.");
+    }
+#endif
+
+    // embraces exit call in other place
+    std::atexit([]() { gState->fQuit = true; });
 
 #if defined(SK_BUILD_FOR_WIN) && defined(SK_ANGLE)
 #if 0
@@ -1831,7 +1843,6 @@ int main(int argc, char** argv) {
     }
 
     sk_sp<SkImage> starImage = draw_star_image(canvas, 50.0f);
-    sk_sp<SkImage> termImage;
 
     TsmVteCtx vte_ctx { &state, invalid_socket_t };
     int ws_row = (float)(state.fDm.w) / state.fFontAdvanceWidth;
@@ -1859,10 +1870,13 @@ int main(int argc, char** argv) {
     int rotation = 0;
 
     while (!state.fQuit) {  // Our application loop
-        state.fRedraw = false;
+        state.fRedrawRequired = false;
 
         canvas->clear(term_get_default_bc());
         handle_sdl_events(&state, window, &canvas, &starImage, vte_ctx.fd, screen, vte);
+        if (state.fQuit) {
+            break;
+        }
 
         long ret = -1;
         char buf[4096];
@@ -1873,8 +1887,8 @@ int main(int argc, char** argv) {
             SkDebugf("term_read_cb: %ld\n", ret);
 #endif
             tsm_vte_input(vte, buf, ret);
-            state.fRedraw = true;
-        } else if (state.fRedrawQueued) {
+            state.fRedrawRequired = true;
+        } else if (state.fRedrawQueued && !is_eof) {
             goto redraw_queued;
         } else if (should_retry) {
             goto redraw;
@@ -1884,12 +1898,16 @@ int main(int argc, char** argv) {
         }
 
 redraw:
-        if (state.fRedraw) {
+        if (state.fRedrawRequired) {
             SkDebugf("term_redraw required\n");
-            gState->fRedraw = false;
+            gState->fRedrawRequired = false;
             if (state.fRedrawTimerId == 0) {
                 gState->fRedrawTimerId = SDL_AddTimer(1000.0f / state.fDm.refresh_rate,
                                                       [](uint32_t, void*) -> uint32_t {
+                    if (gState->fQuit) {
+                        SkDebugf("term_redraw canceled\n");
+                        return 0;
+                    }
                     SkDebugf("term_redraw queued\n");
                     gState->fRedrawTimerId = 0;
 
@@ -1906,19 +1924,15 @@ redraw:
             }
         }
 
-redraw_queued:
-        if (state.fRedrawQueued) {
-            SkDebugf("term_redraw triggered\n");
-            state.fRedrawQueued = false;
-            termImage = draw_term_image(canvas, &state, vte, screen);
-        }
+        continue;
 
-        // draw offscreen terminal canvas
+redraw_queued:
+        // pass 1: draw terminal canvas
         canvas->save();
-        canvas->drawImage(termImage, 0, 0);
+        draw_vte_screen(canvas, &state, vte, screen);
         canvas->restore();
 
-        // draw offscreen star canvas
+        // pass 2: draw star canvas from offline canvas
         canvas->save();
         canvas->translate(state.fDm.w / 2.0 , state.fDm.h / 2.0);
         canvas->rotate(rotation++);
@@ -1929,6 +1943,10 @@ redraw_queued:
         dContext->flushAndSubmit();
 
         SDL_GL_SwapWindow(window);
+    }
+
+    if (uint32_t timerId = state.fRedrawTimerId; timerId != 0) {
+        SDL_RemoveTimer(timerId);
     }
 
 #ifdef SK_BUILD_FOR_WIN
@@ -1945,36 +1963,34 @@ redraw_queued:
 
     close_conpty(vte_ctx.fd);
 
-    std::atexit([]() {
 #if 1
-        // Destory glContext
-        if (glContext) {
-            SDL_GL_DeleteContext(glContext);
-        }
+    // Destory glContext
+    if (glContext) {
+        SDL_GL_DeleteContext(glContext);
+    }
 #else
-        // Remove renderer
-        if (renderer) {
-            SDL_DestroyRenderer(renderer);
-        }
+    // Remove renderer
+    if (renderer) {
+        SDL_DestroyRenderer(renderer);
+    }
 #endif
 
-        // Destroy window
-        if (window) {
-            SDL_DestroyWindow(window);
-        }
+    // Destroy window
+    if (window) {
+        SDL_DestroyWindow(window);
+    }
 
-        // Quit SDL subsystems
-        SDL_Quit();
+    // Quit SDL subsystems
+    SDL_Quit();
 
-        // Cleanup glState At last
-        if (glState) {
-            glState->surface.reset();
-            glState->grContext.reset();
-            glState->glInterface.reset();
-        }
+    // Cleanup glState At last
+    if (glState) {
+        glState->surface.reset();
+        glState->grContext.reset();
+        glState->glInterface.reset();
+    }
 
-        SkDebugf("main thread exited\n");
-    });
+    SkDebugf("main thread exited\n");
 
     return 0;
 }
