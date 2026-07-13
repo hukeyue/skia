@@ -316,8 +316,8 @@ static void handle_size_change(ApplicationState* state, SDL_Window* window, SkCa
     state->fFontAdvanceWidth = gFont->measureText("X", 1U, SkTextEncoding::kUTF8, nullptr);
     state->fFontSpacing = std::min(1.0f, gFont->getSpacing());
 
-    int ws_row = (dw / state->fWidthScale) / state->fFontAdvanceWidth;
-    int ws_col = (dh / state->fHeightScale + state->fFontSpacing) / (state->fFontSize + state->fFontSpacing);
+    int ws_row = std::floorf((dw / state->fWidthScale) / state->fFontAdvanceWidth);
+    int ws_col = std::floorf((dh / state->fHeightScale - state->fFontSpacing) / (state->fFontSize + state->fFontSpacing));
 
     SkDebugf("resize: cell width %f col %f\n", state->fFontAdvanceWidth, state->fFontSize + state->fFontSpacing);
     SkDebugf("resize: row %d col %d\n", ws_row, ws_col);
@@ -1684,8 +1684,8 @@ int main(int argc, char** argv) {
     SkDebugf("default: cell width %f col %f\n", state.fFontAdvanceWidth, state.fFontSize + state.fFontSpacing);
     SkDebugf("default: row %d col %d\n", DEFAULT_ROW, DEFAULT_COL);
     SkDebugf("default: font size %.1f\n", state.fFontSize);
-    state.fDm.w = std::max<float>(state.fDm.w * 0.25f, state.fFontAdvanceWidth * DEFAULT_ROW) * state.fWidthScale;
-    state.fDm.h = std::max<float>(state.fDm.h * 0.25f, (state.fFontSize + state.fFontSpacing) * DEFAULT_COL - state.fFontSpacing) * state.fHeightScale;
+    state.fDm.w = std::ceilf(std::max<float>(state.fDm.w * 0.25f, state.fFontAdvanceWidth * DEFAULT_ROW) * state.fWidthScale);
+    state.fDm.h = std::ceilf(std::max<float>(state.fDm.h * 0.25f, (state.fFontSize + state.fFontSpacing) * DEFAULT_COL + state.fFontSpacing) * state.fHeightScale);
 
     uint32_t windowFlags = 0;
 #if defined(SK_BUILD_FOR_ANDROID) || defined(SK_BUILD_FOR_IOS)
@@ -1845,8 +1845,8 @@ int main(int argc, char** argv) {
     sk_sp<SkImage> starImage = draw_star_image(canvas, 50.0f);
 
     TsmVteCtx vte_ctx { &state, invalid_socket_t };
-    int ws_row = (float)(state.fDm.w) / state.fFontAdvanceWidth;
-    int ws_col = (float)(state.fDm.h + state.fFontSpacing) / (state.fFontSize + state.fFontSpacing);
+    int ws_row = std::floorf((float)(state.fDm.w) / state.fFontAdvanceWidth);
+    int ws_col = std::floorf((float)(state.fDm.h - state.fFontSpacing) / (state.fFontSize + state.fFontSpacing));
     SkDebugf("init: row %d col %d\n", ws_row, ws_col);
     if (!create_conpty(ws_row, ws_col, &vte_ctx.fd, &state)) {
         SkDebugf("init: failed to create conpty\n");
