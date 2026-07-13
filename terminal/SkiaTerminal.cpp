@@ -127,9 +127,9 @@ struct ApplicationState {
     // Storage for the user created rectangles. The last one may still be being edited.
     std::vector<SkRect> fRects;
     std::atomic_bool fQuit;
-    std::atomic_bool fRedrawRequired = false;
-    std::atomic_bool fRedrawQueued = false;
-    std::atomic<uint32_t> fRedrawTimerId = 0x0;
+    bool fRedrawRequired = false;
+    bool fRedrawQueued = false;
+    uint32_t fRedrawTimerId = 0x0;
     float fFontSize;
     float fFontAdvanceWidth;
     float fFontSpacing;
@@ -328,11 +328,12 @@ static void handle_size_change(ApplicationState* state, SDL_Window* window, SkCa
         return;
     }
     tsm_screen_resize(screen, ws_row, ws_col);
+    SkDebugf("term_redraw required\n");
     state->fRedrawRequired = true;
 }
 
 static void handle_sdl_events(ApplicationState* state, SDL_Window* window, SkCanvas** canvas, sk_sp<SkImage>* starImage,
-                              socket_t fd, struct tsm_screen* screen, struct tsm_vte* vte) {
+                              int* rotation, socket_t fd, struct tsm_screen* screen, struct tsm_vte* vte) {
     SDL_Event event;
     while (SDL_PollEvent(&event)) {
         switch (event.type) {
@@ -476,6 +477,7 @@ static void handle_sdl_events(ApplicationState* state, SDL_Window* window, SkCan
                     SkDebugf("sdl: key event %d\n", key);
                     tsm_screen_sb_reset(screen);
                 }
+                SkDebugf("term_redraw required\n");
                 state->fRedrawRequired = true;
                 break;
             }
@@ -495,8 +497,9 @@ static void handle_sdl_events(ApplicationState* state, SDL_Window* window, SkCan
                 state->fQuit = true;
                 break;
             case SDL_USEREVENT:
-                SkDebugf("user event\n");
+                SkDebugf("term_redraw queued\n");
                 state->fRedrawQueued = true;
+                ++*rotation;
                 break;
             default:
                 break;
@@ -1869,11 +1872,35 @@ int main(int argc, char** argv) {
 
     int rotation = 0;
 
+    state.fRedrawTimerId = SDL_AddTimer(1000.0f / state.fDm.refresh_rate,
+                                        [](uint32_t, void*) -> uint32_t {
+        if (gState->fQuit) {
+            SkDebugf("term_redraw canceled\n");
+            return 0;
+        }
+        SkDebugf("term_redraw required\n");
+
+        SDL_Event user_event;
+        SDL_zero(user_event); // Initialize the event structure
+        user_event.type = SDL_USEREVENT; // Custom event type
+        user_event.user.code = 1; // Custom code
+        user_event.user.data1 = NULL;
+        user_event.user.data2 = NULL;
+
+        SDL_PushEvent(&user_event);
+        return 1000.0f / gState->fDm.refresh_rate;
+    }, nullptr);
+
+    if (state.fRedrawTimerId == 0) {
+        SkDebugf("sdl: failed to create redraw timer\n");
+        return 1;
+    }
+
     while (!state.fQuit) {  // Our application loop
         state.fRedrawRequired = false;
 
         canvas->clear(term_get_default_bc());
-        handle_sdl_events(&state, window, &canvas, &starImage, vte_ctx.fd, screen, vte);
+        handle_sdl_events(&state, window, &canvas, &starImage, &rotation, vte_ctx.fd, screen, vte);
         if (state.fQuit) {
             break;
         }
@@ -1887,46 +1914,31 @@ int main(int argc, char** argv) {
             SkDebugf("term_read_cb: %ld\n", ret);
 #endif
             tsm_vte_input(vte, buf, ret);
+            SkDebugf("term_redraw required\n");
             state.fRedrawRequired = true;
         } else if (state.fRedrawQueued && !is_eof) {
             goto redraw_queued;
         } else if (should_retry) {
-            goto redraw;
+            goto should_retry;
         } else {
             SkASSERT(is_eof);
             break;
         }
 
-redraw:
+should_retry:
         if (state.fRedrawRequired) {
-            SkDebugf("term_redraw required\n");
-            gState->fRedrawRequired = false;
-            if (state.fRedrawTimerId == 0) {
-                gState->fRedrawTimerId = SDL_AddTimer(1000.0f / state.fDm.refresh_rate,
-                                                      [](uint32_t, void*) -> uint32_t {
-                    if (gState->fQuit) {
-                        SkDebugf("term_redraw canceled\n");
-                        return 0;
-                    }
-                    SkDebugf("term_redraw queued\n");
-                    gState->fRedrawTimerId = 0;
-
-                    SDL_Event user_event;
-                    SDL_zero(user_event); // Initialize the event structure
-                    user_event.type = SDL_USEREVENT; // Custom event type
-                    user_event.user.code = 1; // Custom code
-                    user_event.user.data1 = NULL;
-                    user_event.user.data2 = NULL;
-
-                    SDL_PushEvent(&user_event);
-                    return 0;
-                }, nullptr);
-            }
+            state.fRedrawRequired = false;
+            SkDebugf("term_redraw queued\n");
+            state.fRedrawQueued = true;
+        } else {
+            SDL_Delay(3.1415926f * 2); // limited to 150 fps
         }
 
         continue;
 
 redraw_queued:
+        state.fRedrawQueued = false;
+
         // pass 1: draw terminal canvas
         canvas->save();
         draw_vte_screen(canvas, &state, vte, screen);
@@ -1935,7 +1947,7 @@ redraw_queued:
         // pass 2: draw star canvas from offline canvas
         canvas->save();
         canvas->translate(state.fDm.w / 2.0 , state.fDm.h / 2.0);
-        canvas->rotate(rotation++);
+        canvas->rotate(rotation);
         canvas->drawImage(starImage, -50.0f, -50.0f);
         canvas->restore();
 
