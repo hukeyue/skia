@@ -114,6 +114,14 @@ struct ApplicationState;
 
 static bool resize_conpty(int ws_row, int ws_col, socket_t fd, ApplicationState *state);
 
+static void update_window_title(SDL_Window *window, const char* name, int ws_row, int ws_col) {
+    char buffer[64];
+    int len = snprintf(buffer, sizeof(buffer), "SkTerminal - %s - %dx%d", name, ws_row, ws_col);
+    char* stop = buffer + len;
+    *stop = '\0';
+    SDL_SetWindowTitle(window, buffer);
+}
+
 /*
  * This application is a simple example of how to combine SDL and Skia it demonstrates:
  *   how to setup gpu rendering to the main window
@@ -318,6 +326,12 @@ static void handle_size_change(ApplicationState* state, SDL_Window* window, SkCa
 
     int ws_row = std::floorf((dw / state->fWidthScale) / state->fFontAdvanceWidth);
     int ws_col = std::floorf((dh / state->fHeightScale - state->fFontSpacing) / (state->fFontSize + state->fFontSpacing));
+
+#ifdef SK_BUILD_FOR_WIN
+    update_window_title(window, "cmd.exe", ws_row, ws_col);
+#else
+    update_window_title(window, "bash", ws_row, ws_col);
+#endif
 
     SkDebugf("resize: cell width %f col %f\n", state->fFontAdvanceWidth, state->fFontSize + state->fFontSpacing);
     SkDebugf("resize: row %d col %d\n", ws_row, ws_col);
@@ -1850,6 +1864,13 @@ int main(int argc, char** argv) {
     TsmVteCtx vte_ctx { &state, invalid_socket_t };
     int ws_row = std::floorf((float)(state.fDm.w) / state.fFontAdvanceWidth);
     int ws_col = std::floorf((float)(state.fDm.h - state.fFontSpacing) / (state.fFontSize + state.fFontSpacing));
+
+#ifdef SK_BUILD_FOR_WIN
+    update_window_title(window, "cmd.exe", ws_row, ws_col);
+#else
+    update_window_title(window, "bash", ws_row, ws_col);
+#endif
+
     SkDebugf("init: row %d col %d\n", ws_row, ws_col);
     if (!create_conpty(ws_row, ws_col, &vte_ctx.fd, &state)) {
         SkDebugf("init: failed to create conpty\n");
