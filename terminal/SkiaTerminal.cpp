@@ -539,7 +539,7 @@ HRESULT InitializeStartupInfoAttachedToConPTY(STARTUPINFOEXW* siEx, HPCON hPC)
     attrList = std::make_unique<BYTE[]>(size);
 
     // Set startup info's attribute list & initialize it
-    siEx->lpAttributeList = reinterpret_cast<PPROC_THREAD_ATTRIBUTE_LIST>(attrList.release());
+    siEx->lpAttributeList = reinterpret_cast<PPROC_THREAD_ATTRIBUTE_LIST>(attrList.get());
     fSuccess = ::InitializeProcThreadAttributeList(
         siEx->lpAttributeList, 1, 0, (PSIZE_T)&size);
     if (!fSuccess) {
@@ -558,6 +558,9 @@ HRESULT InitializeStartupInfoAttachedToConPTY(STARTUPINFOEXW* siEx, HPCON hPC)
         hr = HRESULT_FROM_WIN32(GetLastError());
         goto cleanup;
     }
+
+    // ConPTY is set to you sucessfully
+    static_cast<void>(attrList.release());
 
 cleanup:
     return hr;
