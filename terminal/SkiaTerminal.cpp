@@ -169,7 +169,6 @@ static void handle_sdl_error() {
 }
 
 static SkFont *gFont, *gFontBold;
-static ApplicationState *gState;
 static GLState *glState;
 
 static SkCanvas* glGetCanvas(int dw, int dh, uint32_t windowFormat, int contextType,
@@ -565,6 +564,7 @@ cleanup:
 }
 
 struct listen_ctx {
+    ApplicationState *state;
     HANDLE outPipeOurSide, inPipeOurSide;
     HANDLE hPC;
     HANDLE hThread, hProcess;
@@ -599,6 +599,7 @@ HRESULT WriteFileN(HANDLE hFile, LPCVOID lpBuffer, DWORD nNumberOfBytesToWrite, 
 
 void __cdecl send_wndc(LPVOID lp) {
     listen_ctx *ctx { reinterpret_cast<listen_ctx*>(lp) };
+    ApplicationState *state = ctx->state;
     HRESULT hr = S_OK;
 
     const DWORD BUFF_SIZE{ 512 };
@@ -628,11 +629,12 @@ void __cdecl send_wndc(LPVOID lp) {
     } while (fRead);
 
     SkDebugf("send EOF\n");
-    gState->fQuit = true;
+    state->fQuit = true;
 }
 
 void __cdecl recv_wndc(LPVOID lp) {
     listen_ctx *ctx { reinterpret_cast<listen_ctx*>(lp) };
+    ApplicationState *state = ctx->state;
     HRESULT hr = S_OK;
     int err;
 
@@ -684,14 +686,15 @@ void __cdecl recv_wndc(LPVOID lp) {
     } while (fRead);
 
     SkDebugf("recv EOF\n");
-    gState->fQuit = true;
+    state->fQuit = true;
 }
 
 void __cdecl monitor_wndc(LPVOID lp) {
     listen_ctx *ctx { reinterpret_cast<listen_ctx*>(lp) };
+    ApplicationState *state = ctx->state;
     HRESULT hr = S_OK;
 
-    while (!gState->fQuit) {
+    while (!state->fQuit) {
       DWORD retVal = WaitForSingleObject(ctx->hProcess, 100);
       switch (retVal) {
         case WAIT_OBJECT_0:
@@ -710,7 +713,7 @@ void __cdecl monitor_wndc(LPVOID lp) {
 
 gone:
     SkDebugf("monitor EOF\n");
-    gState->fQuit = true;
+    state->fQuit = true;
 }
 
 // inspired by vim's channel.c
@@ -878,6 +881,7 @@ static bool create_conpty(int ws_row, int ws_col, SOCKET *fd, ApplicationState *
     }
 
     ctx = new listen_ctx;
+    ctx->state = state;
     ctx->outPipeOurSide = outPipeOurSide;
     ctx->inPipeOurSide = inPipeOurSide;
     ctx->hPC = hPC;
@@ -893,11 +897,11 @@ static bool create_conpty(int ws_row, int ws_col, SOCKET *fd, ApplicationState *
     // Create & start thread to listen to the incoming pipe
     // Note: Using CRT-safe _beginthread() rather than CreateThread()
     gListenCtx = ctx;
-    gState->fMonitorThread = reinterpret_cast<HANDLE>(_beginthread(monitor_wndc, 0, ctx));
+    state->fMonitorThread = reinterpret_cast<HANDLE>(_beginthread(monitor_wndc, 0, ctx));
     SkDebugf("monitor thread began\n");
-    gState->fSendThread = reinterpret_cast<HANDLE>(_beginthread(send_wndc, 0, ctx));
+    state->fSendThread = reinterpret_cast<HANDLE>(_beginthread(send_wndc, 0, ctx));
     SkDebugf("send thread began\n");
-    gState->fRecvThread = reinterpret_cast<HANDLE>(_beginthread(recv_wndc, 0, ctx));
+    state->fRecvThread = reinterpret_cast<HANDLE>(_beginthread(recv_wndc, 0, ctx));
     SkDebugf("recv thread began\n");
 
 cleanup:
@@ -1629,7 +1633,7 @@ int main(int argc, char** argv) {
     SkDebugf("sdl video driver: %s\n", SDL_GetCurrentVideoDriver());
 
     ApplicationState state {};
-    gState = &state;
+    static ApplicationState *gState = &state;
 
     // embraces interrupt signal
     auto signal_handler = [](int sig) {
@@ -1667,11 +1671,11 @@ int main(int argc, char** argv) {
     }
     SkDebugf("sdl video driver: %s\n", SDL_GetCurrentVideoDriver());
 #ifdef SK_BUILD_FOR_WIN
-    gState->fWidthScale = dpi.first / 96.0;
-    gState->fHeightScale = dpi.second / 96.0;
-    gState->fFontSize = gState->fFontSize;
+    state.fWidthScale = dpi.first / 96.0;
+    state.fHeightScale = dpi.second / 96.0;
+    state.fFontSize = state.fFontSize;
 #else
-    gState->fWidthScale = gState->fHeightScale = 1.00;
+    state.fWidthScale = state.fHeightScale = 1.00;
 #endif
 
     sk_sp<SkTypeface> typeface = SkTypeface::MakeFromName(DEFAULT_FONT, SkFontStyle::Normal());
@@ -1847,8 +1851,8 @@ int main(int argc, char** argv) {
     SDL_GL_GetDrawableSize(window, &dw, &dh);
     SkDebugf("gl: width %d height %d\n", dw, dh);
 
-    gState->fDw = dw;
-    gState->fDh = dh;
+    state.fDw = dw;
+    state.fDh = dh;
 
     state.fWidthScale = (double)dw / state.fDm.w;
     state.fHeightScale = (double)dh / state.fDm.h;
@@ -1879,8 +1883,8 @@ int main(int argc, char** argv) {
         SkDebugf("init: failed to create conpty\n");
         return -1;
     }
-    gState->fRow = ws_row;
-    gState->fCol = ws_col;
+    state.fRow = ws_row;
+    state.fCol = ws_col;
 
     // create a software-based virtual terminal
     struct tsm_screen* screen = nullptr;
@@ -1897,8 +1901,9 @@ int main(int argc, char** argv) {
     int rotation = 0;
 
     state.fRedrawTimerId = SDL_AddTimer(1000.0f / state.fDm.refresh_rate,
-                                        [](uint32_t, void*) -> uint32_t {
-        if (gState->fQuit) {
+                                        [](uint32_t, void *ctx) -> uint32_t {
+        auto state = reinterpret_cast<ApplicationState*>(ctx);
+        if (state->fQuit) {
             SkDebugf("term_redraw canceled\n");
             return 0;
         }
@@ -1914,8 +1919,8 @@ int main(int argc, char** argv) {
         user_event.user.data2 = NULL;
 
         SDL_PushEvent(&user_event);
-        return 1000.0f / gState->fDm.refresh_rate;
-    }, nullptr);
+        return 1000.0f / state->fDm.refresh_rate;
+    }, &state);
 
     if (state.fRedrawTimerId == 0) {
         SkDebugf("sdl: failed to create redraw timer\n");
