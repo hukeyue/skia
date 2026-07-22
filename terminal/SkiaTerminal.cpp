@@ -512,7 +512,9 @@ static void handle_sdl_events(ApplicationState* state, SDL_Window* window, SkCan
                 state->fQuit = true;
                 break;
             case SDL_USEREVENT:
+#if 0
                 SkDebugf("term_redraw queued\n");
+#endif
                 state->fRedrawQueued = true;
                 ++*rotation;
                 break;
@@ -1900,7 +1902,9 @@ int main(int argc, char** argv) {
             SkDebugf("term_redraw canceled\n");
             return 0;
         }
+#if 0
         SkDebugf("term_redraw required\n");
+#endif
 
         SDL_Event user_event;
         SDL_zero(user_event); // Initialize the event structure
