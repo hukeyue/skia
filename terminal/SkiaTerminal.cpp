@@ -131,7 +131,18 @@ static void update_window_title(SDL_Window *window, const char* name, int ws_row
  *   draw more complex primitives (star)
  */
 
-struct listen_ctx;
+#ifdef SK_BUILD_FOR_WIN
+struct WinListenContext : public SkRefCnt {
+    PFNCREATEPSEUDOCONSOLE fCreatePseudoConsole;
+    PFNRESIZEPSEUDOCONSOLE fResizePseudoConsole;
+    PFNCLOSEPSEUDOCONSOLE fClosePseudoConsole;
+
+    HANDLE outPipeOurSide, inPipeOurSide;
+    HANDLE hPC;
+    HANDLE hThread, hProcess;
+    SOCKET socket;
+};
+#endif
 
 struct ApplicationState {
     ApplicationState() : fQuit(false), fFontSize(12.0), fFontAdvanceWidth(), fFontSpacing() {}
@@ -152,7 +163,7 @@ struct ApplicationState {
     int32_t fDw;
     int32_t fDh;
 #ifdef SK_BUILD_FOR_WIN
-    struct listen_ctx* fListenCtx;
+    sk_sp<WinListenContext> fListenCtx;
     HANDLE fMonitorThread;
     HANDLE fSendThread;
     HANDLE fRecvThread;
@@ -569,13 +580,6 @@ cleanup:
     return hr;
 }
 
-struct listen_ctx {
-    HANDLE outPipeOurSide, inPipeOurSide;
-    HANDLE hPC;
-    HANDLE hThread, hProcess;
-    SOCKET socket;
-};
-
 HRESULT WriteFileN(HANDLE hFile, LPCVOID lpBuffer, DWORD nNumberOfBytesToWrite, LPDWORD lpNumberOfBytesWritten,
                    LPOVERLAPPED lpOverlapped) {
     DWORD numberOfBytesWritten;
@@ -602,7 +606,7 @@ HRESULT WriteFileN(HANDLE hFile, LPCVOID lpBuffer, DWORD nNumberOfBytesToWrite, 
 
 void __cdecl send_wndc(LPVOID lp) {
     ApplicationState *state { reinterpret_cast<ApplicationState*>(lp) };
-    listen_ctx *ctx = state->fListenCtx;
+    sk_sp<WinListenContext> ctx = state->fListenCtx;
     HRESULT hr = S_OK;
 
     const DWORD BUFF_SIZE{ 512 };
@@ -637,7 +641,7 @@ void __cdecl send_wndc(LPVOID lp) {
 
 void __cdecl recv_wndc(LPVOID lp) {
     ApplicationState *state { reinterpret_cast<ApplicationState*>(lp) };
-    listen_ctx *ctx = state->fListenCtx;
+    sk_sp<WinListenContext> ctx = state->fListenCtx;
     HRESULT hr = S_OK;
     int err;
 
@@ -694,7 +698,7 @@ void __cdecl recv_wndc(LPVOID lp) {
 
 void __cdecl monitor_wndc(LPVOID lp) {
     ApplicationState *state { reinterpret_cast<ApplicationState*>(lp) };
-    listen_ctx *ctx = state->fListenCtx;
+    sk_sp<WinListenContext> ctx = state->fListenCtx;
     HRESULT hr = S_OK;
 
     while (!state->fQuit) {
@@ -804,22 +808,47 @@ fail:
     return -1;
 }
 
-static bool create_conpty(int ws_row, int ws_col, socket_t *fd, ApplicationState *state) {
+// conpty: MakeNativeInterface
+static bool init_conpty(ApplicationState *state) {
+    sk_sp<WinListenContext> ctx = sk_make_sp<WinListenContext>();
     HMODULE hLibrary = EnsureKernel32Loaded();
-    HRESULT hr = S_OK;
     const auto fCreatePseudoConsole = (PFNCREATEPSEUDOCONSOLE)GetProcAddress(hLibrary, "CreatePseudoConsole");
     if (fCreatePseudoConsole == nullptr) {
         SkDebugf("conpty: CreatePseudoConsole not found\n");
         return false;
     }
+    const auto fResizePseudoConsole = (PFNRESIZEPSEUDOCONSOLE)GetProcAddress(hLibrary, "ResizePseudoConsole");
+    if (fResizePseudoConsole == nullptr) {
+        SkDebugf("conpty: ResizePseudoConsole not found\n");
+        return false;
+    }
+    // Close ConPTY - this will terminate client process if running
+    const auto fClosePseudoConsole = (PFNCLOSEPSEUDOCONSOLE)GetProcAddress(hLibrary, "ClosePseudoConsole");
+    if (fClosePseudoConsole == nullptr) {
+        SkDebugf("conpty: ClosePseudoConsole not found\n");
+        return false;
+    }
+    ctx->fCreatePseudoConsole = fCreatePseudoConsole;
+    ctx->fResizePseudoConsole = fResizePseudoConsole;
+    ctx->fClosePseudoConsole = fClosePseudoConsole;
+    state->fListenCtx = ctx;
+    return true;
+}
 
+// conpty: MakeSurface
+static bool create_conpty(int ws_row, int ws_col, socket_t *fd, ApplicationState *state) {
+    BOOL fSuccess;
+    HRESULT hr = S_OK;
     HANDLE outPipeOurSide, inPipeOurSide;
     HANDLE outPipePseudoConsoleSide, inPipePseudoConsoleSide;
     HPCON hPC = 0;
     COORD consize;
-    BOOL fSuccess;
     SOCKET client;
-    listen_ctx *ctx;
+    sk_sp<WinListenContext> ctx = state->fListenCtx;
+    STARTUPINFOEXW startupInfoEx {};
+    wchar_t expanded_commandline[MAX_PATH];
+    const wchar_t *commandline = L"%WINDIR%\\system32\\cmd.exe";
+    PROCESS_INFORMATION process_information {};
 
     // Create the in/out pipes:
     if (!::CreatePipe(&inPipePseudoConsoleSide, &inPipeOurSide, nullptr, 0) ||
@@ -833,15 +862,18 @@ static bool create_conpty(int ws_row, int ws_col, socket_t *fd, ApplicationState
     // Create the Pseudo Console, using the pipes
     consize.X = ws_row;
     consize.Y = ws_col;
-    hr = fCreatePseudoConsole(consize, inPipePseudoConsoleSide, outPipePseudoConsoleSide, 0, &hPC);
+    hr = ctx->fCreatePseudoConsole(consize, inPipePseudoConsoleSide, outPipePseudoConsoleSide, 0, &hPC);
     if (FAILED(hr)) {
         SkDebugf("conpty: CreatePseudoConsole %s\n",
                  std::system_category().message(hr).c_str());
+        ::CloseHandle(inPipeOurSide);
+        ::CloseHandle(outPipeOurSide);
+        ::CloseHandle(inPipePseudoConsoleSide);
+        ::CloseHandle(outPipePseudoConsoleSide);
         return false;
     }
 
     // Prepare the StartupInfoEx structure attached to the ConPTY.
-    STARTUPINFOEXW startupInfoEx {};
     startupInfoEx.StartupInfo.cb = sizeof(startupInfoEx);
 
     hr = InitializeStartupInfoAttachedToConPTY(&startupInfoEx, hPC);
@@ -856,11 +888,7 @@ static bool create_conpty(int ws_row, int ws_col, socket_t *fd, ApplicationState
     }
 
     // Create the client application, using startup info containing ConPTY info
-    wchar_t expanded_commandline[MAX_PATH];
-    const wchar_t *commandline = L"%WINDIR%\\system32\\cmd.exe";
     ::ExpandEnvironmentStringsW(commandline, expanded_commandline, sizeof(expanded_commandline));
-
-    PROCESS_INFORMATION process_information {};
 
     fSuccess = ::CreateProcessW(
                     nullptr,                       // No module ame - use Command Line
@@ -883,7 +911,6 @@ static bool create_conpty(int ws_row, int ws_col, socket_t *fd, ApplicationState
         goto cleanup;
     }
 
-    ctx = new listen_ctx;
     ctx->outPipeOurSide = outPipeOurSide;
     ctx->inPipeOurSide = inPipeOurSide;
     ctx->hPC = hPC;
@@ -892,13 +919,14 @@ static bool create_conpty(int ws_row, int ws_col, socket_t *fd, ApplicationState
     if (socketpair(&ctx->socket, &client) < 0) {
         SkDebugf("conpty: socketpair failed\n");
         fSuccess = false;
+        ::CloseHandle(inPipeOurSide);
+        ::CloseHandle(outPipeOurSide);
         goto cleanup;
     }
     *fd = client;
 
     // Create & start thread to listen to the incoming pipe
     // Note: Using CRT-safe _beginthread() rather than CreateThread()
-    state->fListenCtx = ctx;
     state->fMonitorThread = reinterpret_cast<HANDLE>(_beginthread(monitor_wndc, 0, state));
     SkDebugf("monitor thread began\n");
     state->fSendThread = reinterpret_cast<HANDLE>(_beginthread(send_wndc, 0, state));
@@ -915,25 +943,18 @@ cleanup:
 }
 
 static bool resize_conpty(int ws_row, int ws_col, socket_t /*fd*/, ApplicationState *state) {
-    HMODULE hLibrary = EnsureKernel32Loaded();
+    sk_sp<WinListenContext> ctx = state->fListenCtx;
+    COORD consize;
     HRESULT hr = S_OK;
-    const auto fResizePseudoConsole = (PFNRESIZEPSEUDOCONSOLE)GetProcAddress(hLibrary, "ResizePseudoConsole");
-    if (fResizePseudoConsole == nullptr) {
-        SkDebugf("conpty: ResizePseudoConsole not found\n");
-        return false;
-    }
-
-    listen_ctx *ctx = state->fListenCtx;
 
     // Retrieve width and height dimensions of display in
     // characters using theoretical height/width functions
     // that can retrieve the properties from the display
     // attached to the event.
-    COORD consize;
     consize.X = ws_row;
     consize.Y = ws_col;
 
-    hr = fResizePseudoConsole(ctx->hPC, consize);
+    hr = ctx->fResizePseudoConsole(ctx->hPC, consize);
     if (FAILED(hr)) {
         SkDebugf("conpty: ResizePseudoConsole %s",
                  std::system_category().message(hr).c_str());
@@ -943,19 +964,11 @@ static bool resize_conpty(int ws_row, int ws_col, socket_t /*fd*/, ApplicationSt
 }
 
 static void close_conpty(socket_t /*fd*/, ApplicationState *state) {
-    listen_ctx *ctx = state->fListenCtx;
-    // Close ConPTY - this will terminate client process if running
-    HMODULE hLibrary = EnsureKernel32Loaded();
-    const auto fClosePseudoConsole = (PFNCLOSEPSEUDOCONSOLE)GetProcAddress(hLibrary, "ClosePseudoConsole");
-    if (fClosePseudoConsole == nullptr) {
-        SkDebugf("conpty: ClosePseudoConsole not found\n");
-        goto cleanup;
-    }
+    sk_sp<WinListenContext> ctx = state->fListenCtx;
 
     // Close ConPTY - this will terminate client process if running
-    fClosePseudoConsole(ctx->hPC);
+    ctx->fClosePseudoConsole(ctx->hPC);
 
-cleanup:
     // Clean-up the pipes
     ::CloseHandle(ctx->inPipeOurSide);
     ::CloseHandle(ctx->outPipeOurSide);
@@ -964,10 +977,13 @@ cleanup:
     ::CloseHandle(ctx->hThread);
     ::TerminateProcess(ctx->hProcess, /*uExitCode*/ 0);
     ::CloseHandle(ctx->hProcess);
-
-    delete ctx;
 }
 #else
+// MakeNativeInterface
+static bool init_conpty(ApplicationState *state) {
+    return true;
+}
+
 static bool create_conpty(int ws_row, int ws_col, socket_t *fd, ApplicationState *state) {
     struct termios term;
     struct winsize ws;
@@ -1883,6 +1899,10 @@ int main(int argc, char** argv) {
 #endif
 
     SkDebugf("init: row %d col %d\n", ws_row, ws_col);
+    if (!init_conpty(&state)) {
+        SkDebugf("init: failed to initialize conpty\n");
+        return -1;
+    }
     if (!create_conpty(ws_row, ws_col, &vte_ctx.fd, &state)) {
         SkDebugf("init: failed to create conpty\n");
         return -1;
