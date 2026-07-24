@@ -131,6 +131,8 @@ static void update_window_title(SDL_Window *window, const char* name, int ws_row
  *   draw more complex primitives (star)
  */
 
+struct listen_ctx;
+
 struct ApplicationState {
     ApplicationState() : fQuit(false), fFontSize(12.0), fFontAdvanceWidth(), fFontSpacing() {}
     // Storage for the user created rectangles. The last one may still be being edited.
@@ -150,6 +152,7 @@ struct ApplicationState {
     int32_t fDw;
     int32_t fDh;
 #ifdef SK_BUILD_FOR_WIN
+    struct listen_ctx* fListenCtx;
     HANDLE fMonitorThread;
     HANDLE fSendThread;
     HANDLE fRecvThread;
@@ -374,13 +377,13 @@ static void handle_sdl_events(ApplicationState* state, SDL_Window* window, SkCan
                 /*  CTRL+SHIFT +/-  Zoom */
                 if (modifier & KMOD_SHIFT && modifier & KMOD_CTRL &&
                     !(modifier & KMOD_ALT)) {
-                    if (key == '=' /*SDLK_PLUS*/ && state->fFontSize + 1.0f / state->fWidthScale <= 32.0) {
+                    if (key == '=' /*SDLK_PLUS*/ && (state->fFontSize + 1.0f) / state->fWidthScale <= 32.0) {
                         state->fFontSize += 1.0 / state->fWidthScale;
                         gFont->setSize(state->fFontSize);
                         gFontBold->setSize(state->fFontSize);
                         handle_size_change(state, window, canvas, starImage, fd, screen, vte);
                         return;
-                    } else if (key == SDLK_MINUS && state->fFontSize - 1.0f / state->fWidthScale >= 8.0) {
+                    } else if (key == SDLK_MINUS && (state->fFontSize - 1.0f) / state->fWidthScale >= 8.0) {
                         state->fFontSize -= 1.0 / state->fWidthScale;
                         gFont->setSize(state->fFontSize);
                         gFontBold->setSize(state->fFontSize);
@@ -567,14 +570,11 @@ cleanup:
 }
 
 struct listen_ctx {
-    ApplicationState *state;
     HANDLE outPipeOurSide, inPipeOurSide;
     HANDLE hPC;
     HANDLE hThread, hProcess;
     SOCKET socket;
 };
-
-static listen_ctx *gListenCtx;
 
 HRESULT WriteFileN(HANDLE hFile, LPCVOID lpBuffer, DWORD nNumberOfBytesToWrite, LPDWORD lpNumberOfBytesWritten,
                    LPOVERLAPPED lpOverlapped) {
@@ -601,8 +601,8 @@ HRESULT WriteFileN(HANDLE hFile, LPCVOID lpBuffer, DWORD nNumberOfBytesToWrite, 
 }
 
 void __cdecl send_wndc(LPVOID lp) {
-    listen_ctx *ctx { reinterpret_cast<listen_ctx*>(lp) };
-    ApplicationState *state = ctx->state;
+    ApplicationState *state { reinterpret_cast<ApplicationState*>(lp) };
+    listen_ctx *ctx = state->fListenCtx;
     HRESULT hr = S_OK;
 
     const DWORD BUFF_SIZE{ 512 };
@@ -636,8 +636,8 @@ void __cdecl send_wndc(LPVOID lp) {
 }
 
 void __cdecl recv_wndc(LPVOID lp) {
-    listen_ctx *ctx { reinterpret_cast<listen_ctx*>(lp) };
-    ApplicationState *state = ctx->state;
+    ApplicationState *state { reinterpret_cast<ApplicationState*>(lp) };
+    listen_ctx *ctx = state->fListenCtx;
     HRESULT hr = S_OK;
     int err;
 
@@ -693,8 +693,8 @@ void __cdecl recv_wndc(LPVOID lp) {
 }
 
 void __cdecl monitor_wndc(LPVOID lp) {
-    listen_ctx *ctx { reinterpret_cast<listen_ctx*>(lp) };
-    ApplicationState *state = ctx->state;
+    ApplicationState *state { reinterpret_cast<ApplicationState*>(lp) };
+    listen_ctx *ctx = state->fListenCtx;
     HRESULT hr = S_OK;
 
     while (!state->fQuit) {
@@ -804,7 +804,7 @@ fail:
     return -1;
 }
 
-static bool create_conpty(int ws_row, int ws_col, SOCKET *fd, ApplicationState *state) {
+static bool create_conpty(int ws_row, int ws_col, socket_t *fd, ApplicationState *state) {
     HMODULE hLibrary = EnsureKernel32Loaded();
     HRESULT hr = S_OK;
     PFNCREATEPSEUDOCONSOLE const CreatePseudoConsole = (PFNCREATEPSEUDOCONSOLE)GetProcAddress(hLibrary, "CreatePseudoConsole");
@@ -884,7 +884,6 @@ static bool create_conpty(int ws_row, int ws_col, SOCKET *fd, ApplicationState *
     }
 
     ctx = new listen_ctx;
-    ctx->state = state;
     ctx->outPipeOurSide = outPipeOurSide;
     ctx->inPipeOurSide = inPipeOurSide;
     ctx->hPC = hPC;
@@ -899,12 +898,12 @@ static bool create_conpty(int ws_row, int ws_col, SOCKET *fd, ApplicationState *
 
     // Create & start thread to listen to the incoming pipe
     // Note: Using CRT-safe _beginthread() rather than CreateThread()
-    gListenCtx = ctx;
-    state->fMonitorThread = reinterpret_cast<HANDLE>(_beginthread(monitor_wndc, 0, ctx));
+    state->fListenCtx = ctx;
+    state->fMonitorThread = reinterpret_cast<HANDLE>(_beginthread(monitor_wndc, 0, state));
     SkDebugf("monitor thread began\n");
-    state->fSendThread = reinterpret_cast<HANDLE>(_beginthread(send_wndc, 0, ctx));
+    state->fSendThread = reinterpret_cast<HANDLE>(_beginthread(send_wndc, 0, state));
     SkDebugf("send thread began\n");
-    state->fRecvThread = reinterpret_cast<HANDLE>(_beginthread(recv_wndc, 0, ctx));
+    state->fRecvThread = reinterpret_cast<HANDLE>(_beginthread(recv_wndc, 0, state));
     SkDebugf("recv thread began\n");
 
 cleanup:
@@ -915,7 +914,7 @@ cleanup:
     return fSuccess;
 }
 
-static bool resize_conpty(int ws_row, int ws_col, socket_t /*fd*/, ApplicationState* state) {
+static bool resize_conpty(int ws_row, int ws_col, socket_t /*fd*/, ApplicationState *state) {
     HMODULE hLibrary = EnsureKernel32Loaded();
     HRESULT hr = S_OK;
     PFNRESIZEPSEUDOCONSOLE const ResizePseudoConsole = (PFNRESIZEPSEUDOCONSOLE)GetProcAddress(hLibrary, "ResizePseudoConsole");
@@ -923,6 +922,8 @@ static bool resize_conpty(int ws_row, int ws_col, socket_t /*fd*/, ApplicationSt
         SkDebugf("FATAL: ResizePseudoConsole not found\n");
         return false;
     }
+
+    listen_ctx *ctx = state->fListenCtx;
 
     // Retrieve width and height dimensions of display in
     // characters using theoretical height/width functions
@@ -932,7 +933,7 @@ static bool resize_conpty(int ws_row, int ws_col, socket_t /*fd*/, ApplicationSt
     consize.X = ws_row;
     consize.Y = ws_col;
 
-    hr = ResizePseudoConsole(gListenCtx->hPC, consize);
+    hr = ResizePseudoConsole(ctx->hPC, consize);
     if (FAILED(hr)) {
         SkDebugf("resize: ResizePseudoConsole %s",
                  std::system_category().message(hr).c_str());
@@ -941,8 +942,8 @@ static bool resize_conpty(int ws_row, int ws_col, socket_t /*fd*/, ApplicationSt
     return true;
 }
 
-static void close_conpty(SOCKET /*fd*/) {
-    listen_ctx* ctx = gListenCtx;
+static void close_conpty(socket_t /*fd*/, ApplicationState *state) {
+    listen_ctx *ctx = state->fListenCtx;
     // Close ConPTY - this will terminate client process if running
     HMODULE hLibrary = EnsureKernel32Loaded();
     PFNCLOSEPSEUDOCONSOLE const ClosePseudoConsole = (PFNCLOSEPSEUDOCONSOLE)GetProcAddress(hLibrary, "ClosePseudoConsole");
@@ -965,10 +966,9 @@ cleanup:
     ::CloseHandle(ctx->hProcess);
 
     delete ctx;
-    gListenCtx = nullptr;
 }
 #else
-static bool create_conpty(int ws_row, int ws_col, int *fd, ApplicationState *state) {
+static bool create_conpty(int ws_row, int ws_col, socket_t *fd, ApplicationState *state) {
     struct termios term;
     struct winsize ws;
     memset(&term, 0, sizeof(term));
@@ -1048,8 +1048,9 @@ static bool resize_conpty(int ws_row, int ws_col, socket_t fd, ApplicationState 
     return true;
 }
 
-static void close_conpty(socket_t fd) {
+static void close_conpty(socket_t fd, ApplicationState *state) {
     close(fd);
+    static_cast<void>(state);
 }
 #endif
 
@@ -2007,7 +2008,7 @@ redraw_queued:
     SkDebugf("monitor thread exited\n");
 #endif
 
-    close_conpty(vte_ctx.fd);
+    close_conpty(vte_ctx.fd, &state);
 
 #if 1
     // Destory glContext
