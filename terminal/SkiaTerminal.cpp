@@ -652,16 +652,16 @@ void __cdecl recv_wndc(LPVOID lp) {
     DWORD dwBytesRead{};
     BOOL fRead{ FALSE };
     OVERLAPPED ovRead = {};
+    int maxfd = listen_ctx->socket;
 
-    fd_set rfds;
-    struct timeval tv;
-    tv.tv_sec = 0;
-    tv.tv_usec = 10 * 1000;
+    fd_set rfds ,efds;
     do
     {
         FD_ZERO(&rfds);
+        FD_ZERO(&efds);
         FD_SET(listen_ctx->socket, &rfds);
-        int retVal = select(1, &rfds, nullptr, nullptr, &tv);
+        FD_SET(listen_ctx->socket, &efds);
+        int retVal = select(maxfd + 1, &rfds, nullptr, &efds, NULL);
         if (retVal == -1) {
             err = WSAGetLastError();
             SkDebugf("select(): read tsm error %s\n",
@@ -671,6 +671,11 @@ void __cdecl recv_wndc(LPVOID lp) {
             /* No data/event to socket */
             fRead = true;
             continue;
+        } else if (FD_ISSET(listen_ctx->socket, &efds)) {
+            err = WSAGetLastError();
+            SkDebugf("select(): tsm socket error %s\n",
+                     std::system_category().message(err).c_str());
+            break;
         }
         // Write received text to the Console
         // Note: Write to the Console using WriteFile(hConsole...), not printf()/puts() to
@@ -702,7 +707,7 @@ void __cdecl monitor_wndc(LPVOID lp) {
     HRESULT hr = S_OK;
 
     while (!state->fQuit) {
-      DWORD retVal = WaitForSingleObject(listen_ctx->hProcess, 100);
+      DWORD retVal = WaitForSingleObject(listen_ctx->hProcess, INFINITE);
       switch (retVal) {
         case WAIT_OBJECT_0:
             goto gone;
@@ -2016,19 +2021,16 @@ redraw_queued:
         SDL_RemoveTimer(timerId);
     }
 
+    close_conpty(vte_ctx.fd, &state);
+
 #ifdef SK_BUILD_FOR_WIN
-    TerminateThread(state.fRecvThread, /*dwExitCode*/ 0);
-    WaitForSingleObject(state.fRecvThread, INFINITE);
-    SkDebugf("recv thread exited\n");
-    TerminateThread(state.fSendThread, /*dwExitCode*/ 0);
-    WaitForSingleObject(state.fSendThread, INFINITE);
-    SkDebugf("send thread exited\n");
-    TerminateThread(state.fMonitorThread, /*dwExitCode*/ 0);
     WaitForSingleObject(state.fMonitorThread, INFINITE);
     SkDebugf("monitor thread exited\n");
+    WaitForSingleObject(state.fSendThread, INFINITE);
+    SkDebugf("send thread exited\n");
+    WaitForSingleObject(state.fRecvThread, INFINITE);
+    SkDebugf("recv thread exited\n");
 #endif
-
-    close_conpty(vte_ctx.fd, &state);
 
 #if 1
     // Destory glContext
