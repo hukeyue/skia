@@ -385,6 +385,14 @@ static void handle_sdl_events(ApplicationState* state, SDL_Window* window, SkCan
                 // SDL_Scancode scancode = SDL_GetScancodeFromKey(key);
                 uint16_t modifier = event.key.keysym.mod;
 
+                /* CTRL+q */
+                if (modifier & KMOD_CTRL &&
+                    !(modifier & KMOD_SHIFT) && !(modifier & KMOD_ALT)) {
+                    if (key == SDLK_q) {
+                        exit(0);
+                    }
+                }
+
                 /*  CTRL+SHIFT +/-  Zoom */
                 if (modifier & KMOD_SHIFT && modifier & KMOD_CTRL &&
                     !(modifier & KMOD_ALT)) {
@@ -1665,9 +1673,15 @@ int main(int argc, char** argv) {
         if (sig == SIGINT) {
             gState->fQuit = true;
         }
+        if (sig == SIGTERM) {
+            gState->fQuit = true;
+        }
     };
     if (signal(SIGINT, signal_handler) != 0) {
         SkDebugf("SIGINT handler was not enabled.");
+    }
+    if (signal(SIGTERM, signal_handler) != 0) {
+        SkDebugf("SIGTERM handler was not enabled.");
     }
 #ifndef SK_BUILD_FOR_WIN
     if (signal(SIGPIPE, SIG_IGN) != 0) {
