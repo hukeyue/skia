@@ -807,9 +807,9 @@ fail:
 static bool create_conpty(int ws_row, int ws_col, socket_t *fd, ApplicationState *state) {
     HMODULE hLibrary = EnsureKernel32Loaded();
     HRESULT hr = S_OK;
-    PFNCREATEPSEUDOCONSOLE const CreatePseudoConsole = (PFNCREATEPSEUDOCONSOLE)GetProcAddress(hLibrary, "CreatePseudoConsole");
-    if (CreatePseudoConsole == nullptr) {
-        SkDebugf("FATAL: CreatePseudoConsole not found\n");
+    const auto fCreatePseudoConsole = (PFNCREATEPSEUDOCONSOLE)GetProcAddress(hLibrary, "CreatePseudoConsole");
+    if (fCreatePseudoConsole == nullptr) {
+        SkDebugf("conpty: CreatePseudoConsole not found\n");
         return false;
     }
 
@@ -833,7 +833,7 @@ static bool create_conpty(int ws_row, int ws_col, socket_t *fd, ApplicationState
     // Create the Pseudo Console, using the pipes
     consize.X = ws_row;
     consize.Y = ws_col;
-    hr = CreatePseudoConsole(consize, inPipePseudoConsoleSide, outPipePseudoConsoleSide, 0, &hPC);
+    hr = fCreatePseudoConsole(consize, inPipePseudoConsoleSide, outPipePseudoConsoleSide, 0, &hPC);
     if (FAILED(hr)) {
         SkDebugf("conpty: CreatePseudoConsole %s\n",
                  std::system_category().message(hr).c_str());
@@ -917,9 +917,9 @@ cleanup:
 static bool resize_conpty(int ws_row, int ws_col, socket_t /*fd*/, ApplicationState *state) {
     HMODULE hLibrary = EnsureKernel32Loaded();
     HRESULT hr = S_OK;
-    PFNRESIZEPSEUDOCONSOLE const ResizePseudoConsole = (PFNRESIZEPSEUDOCONSOLE)GetProcAddress(hLibrary, "ResizePseudoConsole");
-    if (ResizePseudoConsole == nullptr) {
-        SkDebugf("FATAL: ResizePseudoConsole not found\n");
+    const auto fResizePseudoConsole = (PFNRESIZEPSEUDOCONSOLE)GetProcAddress(hLibrary, "ResizePseudoConsole");
+    if (fResizePseudoConsole == nullptr) {
+        SkDebugf("conpty: ResizePseudoConsole not found\n");
         return false;
     }
 
@@ -933,9 +933,9 @@ static bool resize_conpty(int ws_row, int ws_col, socket_t /*fd*/, ApplicationSt
     consize.X = ws_row;
     consize.Y = ws_col;
 
-    hr = ResizePseudoConsole(ctx->hPC, consize);
+    hr = fResizePseudoConsole(ctx->hPC, consize);
     if (FAILED(hr)) {
-        SkDebugf("resize: ResizePseudoConsole %s",
+        SkDebugf("conpty: ResizePseudoConsole %s",
                  std::system_category().message(hr).c_str());
         return false;
     }
@@ -946,14 +946,14 @@ static void close_conpty(socket_t /*fd*/, ApplicationState *state) {
     listen_ctx *ctx = state->fListenCtx;
     // Close ConPTY - this will terminate client process if running
     HMODULE hLibrary = EnsureKernel32Loaded();
-    PFNCLOSEPSEUDOCONSOLE const ClosePseudoConsole = (PFNCLOSEPSEUDOCONSOLE)GetProcAddress(hLibrary, "ClosePseudoConsole");
-    if (ClosePseudoConsole == nullptr) {
-        SkDebugf("FATAL: ClosePseudoConsole not found\n");
+    const auto fClosePseudoConsole = (PFNCLOSEPSEUDOCONSOLE)GetProcAddress(hLibrary, "ClosePseudoConsole");
+    if (fClosePseudoConsole == nullptr) {
+        SkDebugf("conpty: ClosePseudoConsole not found\n");
         goto cleanup;
     }
 
     // Close ConPTY - this will terminate client process if running
-    ClosePseudoConsole(ctx->hPC);
+    fClosePseudoConsole(ctx->hPC);
 
 cleanup:
     // Clean-up the pipes
