@@ -606,7 +606,7 @@ HRESULT WriteFileN(HANDLE hFile, LPCVOID lpBuffer, DWORD nNumberOfBytesToWrite, 
 
 void __cdecl send_wndc(LPVOID lp) {
     ApplicationState *state { reinterpret_cast<ApplicationState*>(lp) };
-    sk_sp<WinListenContext> ctx = state->fListenCtx;
+    sk_sp<WinListenContext> listen_ctx = state->fListenCtx;
     HRESULT hr = S_OK;
 
     const DWORD BUFF_SIZE{ 512 };
@@ -620,12 +620,12 @@ void __cdecl send_wndc(LPVOID lp) {
     do
     {
         // Read from the pipe
-        fRead = ::ReadFile(ctx->outPipeOurSide, szBuffer, BUFF_SIZE, &dwBytesRead, nullptr);
+        fRead = ::ReadFile(listen_ctx->outPipeOurSide, szBuffer, BUFF_SIZE, &dwBytesRead, nullptr);
         SkDebugf("ReadFile(): read stdout %d\n", static_cast<int>(dwBytesRead));
         if (!fRead) {
             break;
         }
-        hr = WriteFileN(reinterpret_cast<HANDLE>(ctx->socket), szBuffer, dwBytesRead, &dwBytesWritten, &ovWrite);
+        hr = WriteFileN(reinterpret_cast<HANDLE>(listen_ctx->socket), szBuffer, dwBytesRead, &dwBytesWritten, &ovWrite);
         if (FAILED(hr)) {
             SkDebugf("WriteFileN(): write tsm error %s\n",
                      std::system_category().message(hr).c_str());
@@ -641,7 +641,7 @@ void __cdecl send_wndc(LPVOID lp) {
 
 void __cdecl recv_wndc(LPVOID lp) {
     ApplicationState *state { reinterpret_cast<ApplicationState*>(lp) };
-    sk_sp<WinListenContext> ctx = state->fListenCtx;
+    sk_sp<WinListenContext> listen_ctx = state->fListenCtx;
     HRESULT hr = S_OK;
     int err;
 
@@ -660,7 +660,7 @@ void __cdecl recv_wndc(LPVOID lp) {
     do
     {
         FD_ZERO(&rfds);
-        FD_SET(ctx->socket, &rfds);
+        FD_SET(listen_ctx->socket, &rfds);
         int retVal = select(1, &rfds, nullptr, nullptr, &tv);
         if (retVal == -1) {
             err = WSAGetLastError();
@@ -675,7 +675,7 @@ void __cdecl recv_wndc(LPVOID lp) {
         // Write received text to the Console
         // Note: Write to the Console using WriteFile(hConsole...), not printf()/puts() to
         // prevent partially-read VT sequences from corrupting output
-        fRead = ::ReadFile(reinterpret_cast<HANDLE>(ctx->socket), szBuffer, BUFF_SIZE, &dwBytesRead, &ovRead);
+        fRead = ::ReadFile(reinterpret_cast<HANDLE>(listen_ctx->socket), szBuffer, BUFF_SIZE, &dwBytesRead, &ovRead);
         if (!fRead) {
             int lastError = GetLastError();
             if (lastError == ERROR_IO_PENDING) {
@@ -688,7 +688,7 @@ void __cdecl recv_wndc(LPVOID lp) {
             break;
         }
         SkDebugf("ReadFile(): read tsm %d\n", static_cast<int>(dwBytesRead));
-        ::WriteFile(ctx->inPipeOurSide, szBuffer, dwBytesRead, &dwBytesWritten, nullptr);
+        ::WriteFile(listen_ctx->inPipeOurSide, szBuffer, dwBytesRead, &dwBytesWritten, nullptr);
         SkDebugf("WriteFile(): stdin %d\n", static_cast<int>(dwBytesWritten));
     } while (fRead);
 
@@ -698,11 +698,11 @@ void __cdecl recv_wndc(LPVOID lp) {
 
 void __cdecl monitor_wndc(LPVOID lp) {
     ApplicationState *state { reinterpret_cast<ApplicationState*>(lp) };
-    sk_sp<WinListenContext> ctx = state->fListenCtx;
+    sk_sp<WinListenContext> listen_ctx = state->fListenCtx;
     HRESULT hr = S_OK;
 
     while (!state->fQuit) {
-      DWORD retVal = WaitForSingleObject(ctx->hProcess, 100);
+      DWORD retVal = WaitForSingleObject(listen_ctx->hProcess, 100);
       switch (retVal) {
         case WAIT_OBJECT_0:
             goto gone;
@@ -810,7 +810,7 @@ fail:
 
 // conpty: MakeNativeInterface
 static bool init_conpty(ApplicationState *state) {
-    sk_sp<WinListenContext> ctx = sk_make_sp<WinListenContext>();
+    sk_sp<WinListenContext> listen_ctx = sk_make_sp<WinListenContext>();
     HMODULE hLibrary = EnsureKernel32Loaded();
     const auto fCreatePseudoConsole = (PFNCREATEPSEUDOCONSOLE)GetProcAddress(hLibrary, "CreatePseudoConsole");
     if (fCreatePseudoConsole == nullptr) {
@@ -828,10 +828,10 @@ static bool init_conpty(ApplicationState *state) {
         SkDebugf("conpty: ClosePseudoConsole not found\n");
         return false;
     }
-    ctx->fCreatePseudoConsole = fCreatePseudoConsole;
-    ctx->fResizePseudoConsole = fResizePseudoConsole;
-    ctx->fClosePseudoConsole = fClosePseudoConsole;
-    state->fListenCtx = ctx;
+    listen_ctx->fCreatePseudoConsole = fCreatePseudoConsole;
+    listen_ctx->fResizePseudoConsole = fResizePseudoConsole;
+    listen_ctx->fClosePseudoConsole = fClosePseudoConsole;
+    state->fListenCtx = listen_ctx;
     return true;
 }
 
@@ -844,7 +844,7 @@ static bool create_conpty(int ws_row, int ws_col, socket_t *fd, ApplicationState
     HPCON hPC = 0;
     COORD consize;
     SOCKET client;
-    sk_sp<WinListenContext> ctx = state->fListenCtx;
+    sk_sp<WinListenContext> listen_ctx = state->fListenCtx;
     STARTUPINFOEXW startupInfoEx {};
     wchar_t expanded_commandline[MAX_PATH];
     const wchar_t *commandline = L"%WINDIR%\\system32\\cmd.exe";
@@ -862,7 +862,7 @@ static bool create_conpty(int ws_row, int ws_col, socket_t *fd, ApplicationState
     // Create the Pseudo Console, using the pipes
     consize.X = ws_row;
     consize.Y = ws_col;
-    hr = ctx->fCreatePseudoConsole(consize, inPipePseudoConsoleSide, outPipePseudoConsoleSide, 0, &hPC);
+    hr = listen_ctx->fCreatePseudoConsole(consize, inPipePseudoConsoleSide, outPipePseudoConsoleSide, 0, &hPC);
     if (FAILED(hr)) {
         SkDebugf("conpty: CreatePseudoConsole %s\n",
                  std::system_category().message(hr).c_str());
@@ -911,12 +911,12 @@ static bool create_conpty(int ws_row, int ws_col, socket_t *fd, ApplicationState
         goto cleanup;
     }
 
-    ctx->outPipeOurSide = outPipeOurSide;
-    ctx->inPipeOurSide = inPipeOurSide;
-    ctx->hPC = hPC;
-    ctx->hThread = process_information.hThread;
-    ctx->hProcess = process_information.hProcess;
-    if (socketpair(&ctx->socket, &client) < 0) {
+    listen_ctx->outPipeOurSide = outPipeOurSide;
+    listen_ctx->inPipeOurSide = inPipeOurSide;
+    listen_ctx->hPC = hPC;
+    listen_ctx->hThread = process_information.hThread;
+    listen_ctx->hProcess = process_information.hProcess;
+    if (socketpair(&listen_ctx->socket, &client) < 0) {
         SkDebugf("conpty: socketpair failed\n");
         fSuccess = false;
         ::CloseHandle(inPipeOurSide);
@@ -943,7 +943,7 @@ cleanup:
 }
 
 static bool resize_conpty(int ws_row, int ws_col, socket_t /*fd*/, ApplicationState *state) {
-    sk_sp<WinListenContext> ctx = state->fListenCtx;
+    sk_sp<WinListenContext> listen_ctx = state->fListenCtx;
     COORD consize;
     HRESULT hr = S_OK;
 
@@ -954,7 +954,7 @@ static bool resize_conpty(int ws_row, int ws_col, socket_t /*fd*/, ApplicationSt
     consize.X = ws_row;
     consize.Y = ws_col;
 
-    hr = ctx->fResizePseudoConsole(ctx->hPC, consize);
+    hr = listen_ctx->fResizePseudoConsole(listen_ctx->hPC, consize);
     if (FAILED(hr)) {
         SkDebugf("conpty: ResizePseudoConsole %s",
                  std::system_category().message(hr).c_str());
@@ -964,19 +964,19 @@ static bool resize_conpty(int ws_row, int ws_col, socket_t /*fd*/, ApplicationSt
 }
 
 static void close_conpty(socket_t /*fd*/, ApplicationState *state) {
-    sk_sp<WinListenContext> ctx = state->fListenCtx;
+    sk_sp<WinListenContext> listen_ctx = state->fListenCtx;
 
     // Close ConPTY - this will terminate client process if running
-    ctx->fClosePseudoConsole(ctx->hPC);
+    listen_ctx->fClosePseudoConsole(listen_ctx->hPC);
 
     // Clean-up the pipes
-    ::CloseHandle(ctx->inPipeOurSide);
-    ::CloseHandle(ctx->outPipeOurSide);
-    ::closesocket(ctx->socket);
+    ::CloseHandle(listen_ctx->inPipeOurSide);
+    ::CloseHandle(listen_ctx->outPipeOurSide);
+    ::closesocket(listen_ctx->socket);
     // Now safe to clean-up client app's process-info & thread
-    ::CloseHandle(ctx->hThread);
-    ::TerminateProcess(ctx->hProcess, /*uExitCode*/ 0);
-    ::CloseHandle(ctx->hProcess);
+    ::CloseHandle(listen_ctx->hThread);
+    ::TerminateProcess(listen_ctx->hProcess, /*uExitCode*/ 0);
+    ::CloseHandle(listen_ctx->hProcess);
 }
 #else
 // MakeNativeInterface
