@@ -99,15 +99,7 @@ extern char **environ;
 #define DEFAULT_FONT "monospace"
 #endif
 
-#define DEFAULT_NAMED_PIPE_PREFIX "\\\\.\\pipe\\skTerminal-%s"
-
-#ifdef SK_BUILD_FOR_WIN
-typedef SOCKET socket_t;
-constexpr socket_t invalid_socket_t = INVALID_SOCKET;
-#else
-typedef int socket_t;
-constexpr socket_t invalid_socket_t = -1;
-#endif
+#define DEFAULT_NAMED_PIPE_PREFIX "\\\\.\\pipe\\skTerminal-%lu-%s"
 
 #ifdef SK_BUILD_FOR_WIN
 typedef std::pair<int, int> SkDPI;
@@ -181,7 +173,7 @@ struct TsmVteCtx {
 #if defined(SK_BUILD_FOR_WIN)
     HANDLE outPipeOurSide, inPipeOurSide;
 #else
-    socket_t fd;
+    int fd;
 #endif
 };
 
@@ -708,8 +700,8 @@ static bool init_conpty(ApplicationState *state) {
     return true;
 }
 
-static BOOL SKCreateNamedPipe(HANDLE *readSide, HANDLE *writeSide, const char* name) {
-    SkDebugf("SKCreateNamedPipe - %s\n", name);
+static BOOL SKCreateNamedPipe(HANDLE *readSide, HANDLE *writeSide, DWORD processId, const char* name) {
+    SkDebugf("SKCreateNamedPipe - pid %lu name %s\n", processId, name);
     // SKCreateNamedPipe
     //
     //
@@ -721,7 +713,7 @@ static BOOL SKCreateNamedPipe(HANDLE *readSide, HANDLE *writeSide, const char* n
     int lastError;
 
     char buffer[64];
-    int len = snprintf(buffer, sizeof(buffer), DEFAULT_NAMED_PIPE_PREFIX, name);
+    int len = snprintf(buffer, sizeof(buffer), DEFAULT_NAMED_PIPE_PREFIX, processId, name);
     char* stop = buffer + len;
     *stop = '\0';
 
@@ -804,10 +796,11 @@ static bool create_conpty(int ws_row, int ws_col, TsmVteCtx *vte_ctx, Applicatio
     wchar_t expanded_commandline[MAX_PATH];
     const wchar_t *commandline = L"%WINDIR%\\system32\\cmd.exe";
     PROCESS_INFORMATION process_information {};
+    DWORD processId = ::GetCurrentProcessId();
 
     // Create the in/out pipes:
-    if (!::SKCreateNamedPipe(&inPipePseudoConsoleSide, &inPipeOurSide, "in") ||
-        !::SKCreateNamedPipe(&outPipeOurSide, &outPipePseudoConsoleSide, "out")) {
+    if (!::SKCreateNamedPipe(&inPipePseudoConsoleSide, &inPipeOurSide, processId, "in") ||
+        !::SKCreateNamedPipe(&outPipeOurSide, &outPipePseudoConsoleSide, processId, "out")) {
         hr = HRESULT_FROM_WIN32(GetLastError());
         SkDebugf("conpty: CreatePipe %s\n",
                  std::system_category().message(hr).c_str());
@@ -1100,6 +1093,7 @@ static long term_read_cb(struct tsm_vte* vte, char* u8, size_t len, bool *is_eof
         SkDebugf("term_read_cb: PeekNamedPipe %s\n",
                  std::system_category().message(hr).c_str());
         *is_eof = true;
+        return 0;
     }
     if (dwBytesRead == 0) {
         *should_retry = true;
@@ -1122,7 +1116,7 @@ static long term_read_cb(struct tsm_vte* vte, char* u8, size_t len, bool *is_eof
 #else
 static void term_write_cb(struct tsm_vte* vte, const char* u8, size_t len, void* data) {
     auto state = reinterpret_cast<TsmVteCtx*>(data)->state;
-    socket_t fd = reinterpret_cast<TsmVteCtx*>(data)->fd;
+    int fd = reinterpret_cast<TsmVteCtx*>(data)->fd;
     int send_len;
     do {
       send_len = write(fd, u8, len);
@@ -1146,7 +1140,7 @@ static void term_write_cb(struct tsm_vte* vte, const char* u8, size_t len, void*
 
 static long term_read_cb(struct tsm_vte* vte, char* u8, size_t len, bool *is_eof,
                          bool *should_retry, void *data) {
-    socket_t fd = reinterpret_cast<TsmVteCtx*>(data)->fd;
+    int fd = reinterpret_cast<TsmVteCtx*>(data)->fd;
     long ret;
     do {
       ret = read(fd, u8, len);
@@ -1874,7 +1868,7 @@ int main(int argc, char** argv) {
 #ifdef SK_BUILD_FOR_WIN
     TsmVteCtx vte_ctx { &state, INVALID_HANDLE_VALUE, INVALID_HANDLE_VALUE };
 #else
-    TsmVteCtx vte_ctx { &state, invalid_socket_t };
+    TsmVteCtx vte_ctx { &state, -1 };
 #endif
 
     int ws_row = std::floorf((float)(state.fDm.w) / state.fFontAdvanceWidth);
