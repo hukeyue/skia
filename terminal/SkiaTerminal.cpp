@@ -99,6 +99,8 @@ extern char **environ;
 #define DEFAULT_FONT "monospace"
 #endif
 
+#define DEFAULT_NAMED_PIPE_PREFIX "\\\\.\\pipe\\skTerminal-%s"
+
 #ifdef SK_BUILD_FOR_WIN
 typedef SOCKET socket_t;
 constexpr socket_t invalid_socket_t = INVALID_SOCKET;
@@ -706,6 +708,89 @@ static bool init_conpty(ApplicationState *state) {
     return true;
 }
 
+static BOOL SKCreateNamedPipe(HANDLE *readSide, HANDLE *writeSide, const char* name) {
+    SkDebugf("SKCreateNamedPipe - %s\n", name);
+    // SKCreateNamedPipe
+    //
+    //
+    BOOL fSuccess;
+    OVERLAPPED ov;
+    HANDLE handleArray[1];
+    HANDLE hPipeServer, hPipeClient;
+    HRESULT hr = S_OK;
+    int lastError;
+
+    char buffer[64];
+    int len = snprintf(buffer, sizeof(buffer), DEFAULT_NAMED_PIPE_PREFIX, name);
+    char* stop = buffer + len;
+    *stop = '\0';
+
+    hPipeServer = ::CreateNamedPipeA(buffer, PIPE_ACCESS_INBOUND | FILE_FLAG_OVERLAPPED,
+                                     PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT, 1, 4096, 4096, 0, NULL);
+    if (hPipeServer == INVALID_HANDLE_VALUE) {
+        hr = HRESULT_FROM_WIN32(GetLastError());
+        SkDebugf("CreateNamedPipeA %s\n",
+                 std::system_category().message(hr).c_str());
+        return FALSE;
+    }
+
+    memset(&ov, 0, sizeof(ov));
+    handleArray[0] = ov.hEvent = ::CreateEvent(NULL, TRUE, FALSE, NULL);
+
+    if (handleArray[0] == INVALID_HANDLE_VALUE) {
+        hr = HRESULT_FROM_WIN32(GetLastError());
+        SkDebugf("CreateEvent %s\n",
+                 std::system_category().message(hr).c_str());
+        ::CloseHandle(hPipeServer);
+        return FALSE;
+    }
+
+    fSuccess = ::ConnectNamedPipe(hPipeServer, &ov);
+    if (!fSuccess) {
+        lastError = GetLastError();
+        hr = HRESULT_FROM_WIN32(lastError);
+        SkDebugf("ConnectNamedPipe %s\n",
+                 std::system_category().message(hr).c_str());
+    }
+
+    hPipeClient = ::CreateFileA(buffer, GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
+    if (hPipeClient == INVALID_HANDLE_VALUE) {
+        hr = HRESULT_FROM_WIN32(GetLastError());
+        SkDebugf("CreateFileA %s\n",
+                 std::system_category().message(hr).c_str());
+        ::CloseHandle(ov.hEvent);
+        ::CloseHandle(hPipeServer);
+        return FALSE;
+    }
+
+    do {
+        switch (::WaitForMultipleObjects(1, handleArray, FALSE, INFINITE)) {
+            case WAIT_OBJECT_0:
+                break;
+            case WAIT_TIMEOUT:
+            case WAIT_FAILED:
+            default:
+                hr = HRESULT_FROM_WIN32(GetLastError());
+                SkDebugf("WaitForMultipleObjects %s\n",
+                         std::system_category().message(hr).c_str());
+                ::CloseHandle(ov.hEvent);
+                ::CloseHandle(hPipeClient);
+                ::CloseHandle(hPipeServer);
+                return FALSE;
+        }
+        if (HasOverlappedIoCompleted(&ov)) {
+            break;
+        }
+    } while (1);
+
+    ::CloseHandle(ov.hEvent);
+
+    *readSide = hPipeServer;
+    *writeSide = hPipeClient;
+
+    return TRUE;
+}
+
 // conpty: MakeSurface
 static bool create_conpty(int ws_row, int ws_col, TsmVteCtx *vte_ctx, ApplicationState *state) {
     BOOL fSuccess;
@@ -721,8 +806,8 @@ static bool create_conpty(int ws_row, int ws_col, TsmVteCtx *vte_ctx, Applicatio
     PROCESS_INFORMATION process_information {};
 
     // Create the in/out pipes:
-    if (!::CreatePipe(&inPipePseudoConsoleSide, &inPipeOurSide, nullptr, 0) ||
-        !::CreatePipe(&outPipeOurSide, &outPipePseudoConsoleSide, nullptr, 0)) {
+    if (!::SKCreateNamedPipe(&inPipePseudoConsoleSide, &inPipeOurSide, "in") ||
+        !::SKCreateNamedPipe(&outPipeOurSide, &outPipePseudoConsoleSide, "out")) {
         hr = HRESULT_FROM_WIN32(GetLastError());
         SkDebugf("conpty: CreatePipe %s\n",
                  std::system_category().message(hr).c_str());
@@ -989,10 +1074,10 @@ static void term_write_cb(struct tsm_vte* vte, const char* u8, size_t len, void*
     auto state = reinterpret_cast<TsmVteCtx*>(data)->state;
     HANDLE inPipeOurSide = reinterpret_cast<TsmVteCtx*>(data)->inPipeOurSide;
     DWORD dwBytesWritten{};
+    HRESULT hr;
 
-    OVERLAPPED ovWrite = {};
+    hr = WriteFileN(inPipeOurSide, u8, len, &dwBytesWritten, NULL);
 
-    HRESULT hr = ::WriteFileN(inPipeOurSide, u8, len, &dwBytesWritten, &ovWrite);
     if (FAILED(hr)) {
         SkDebugf("term_write_cb: WriteFile %s\n",
                  std::system_category().message(hr).c_str());
@@ -1007,15 +1092,24 @@ static long term_read_cb(struct tsm_vte* vte, char* u8, size_t len, bool *is_eof
                          bool *should_retry, void *data) {
     HANDLE outPipeOurSide = reinterpret_cast<TsmVteCtx*>(data)->outPipeOurSide;
     DWORD dwBytesRead{};
-    OVERLAPPED ovRead;
+    HRESULT hr;
 
-    HRESULT hr = ::ReadFileN(outPipeOurSide, u8, len, &dwBytesRead, &ovRead, should_retry);
+    BOOL fSuccess = ::PeekNamedPipe(outPipeOurSide, NULL, 0, NULL, &dwBytesRead, NULL);
+    if (!fSuccess) {
+        hr = HRESULT_FROM_WIN32(GetLastError());
+        SkDebugf("term_read_cb: PeekNamedPipe %s\n",
+                 std::system_category().message(hr).c_str());
+        *is_eof = true;
+    }
+    if (dwBytesRead == 0) {
+        *should_retry = true;
+        return 0;
+    }
 
-    if (*should_retry)
-        return dwBytesRead;
+    hr = ReadFileN(outPipeOurSide, u8, std::min<DWORD>(dwBytesRead, len), &dwBytesRead, NULL, should_retry);
 
     if (FAILED(hr)) {
-        SkDebugf("term_read_cb: ReadFile %s\n",
+        SkDebugf("term_read_cb: ReadFileN %s\n",
                  std::system_category().message(hr).c_str());
         *is_eof = true;
         return dwBytesRead;
