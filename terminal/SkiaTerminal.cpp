@@ -116,8 +116,9 @@ static SkColor term_get_default_fc();
 static SkColor term_get_default_bc();
 
 struct ApplicationState;
+struct TsmVteCtx;
 
-static bool resize_conpty(int ws_row, int ws_col, socket_t fd, ApplicationState *state);
+static bool resize_conpty(int ws_row, int ws_col, TsmVteCtx *ctx, ApplicationState *state);
 
 static void update_window_title(SDL_Window *window, const char* name, int ws_row, int ws_col) {
     char buffer[64];
@@ -144,7 +145,6 @@ struct WinListenContext : public SkRefCnt {
     HANDLE outPipeOurSide, inPipeOurSide;
     HANDLE hPC;
     HANDLE hThread, hProcess;
-    SOCKET socket;
 };
 #endif
 
@@ -169,12 +169,20 @@ struct ApplicationState {
 #ifdef SK_BUILD_FOR_WIN
     sk_sp<WinListenContext> fListenCtx;
     HANDLE fMonitorThread;
-    HANDLE fSendThread;
-    HANDLE fRecvThread;
 #else
     int fPid;
 #endif
 };
+
+struct TsmVteCtx {
+    ApplicationState *state;
+#if defined(SK_BUILD_FOR_WIN)
+    HANDLE outPipeOurSide, inPipeOurSide;
+#else
+    socket_t fd;
+#endif
+};
+
 
 struct GLState {
   sk_sp<const GrGLInterface> glInterface;
@@ -282,7 +290,7 @@ static SkCanvas* glGetCanvas(int dw, int dh, uint32_t windowFormat, int contextT
 static sk_sp<SkImage> draw_star_image(SkCanvas *canvas, float r);
 
 static void handle_size_change(ApplicationState* state, SDL_Window* window, SkCanvas** canvas, sk_sp<SkImage>* starImage,
-                               socket_t fd, struct tsm_screen* screen, struct tsm_vte* vte) {
+                               TsmVteCtx* vte_ctx, struct tsm_screen* screen, struct tsm_vte* vte) {
 
     int dw, dh;
 
@@ -357,7 +365,7 @@ static void handle_size_change(ApplicationState* state, SDL_Window* window, SkCa
     SkDebugf("resize: row %d col %d\n", ws_row, ws_col);
     SkDebugf("resize: font size %.1f\n", state->fFontSize);
 
-    if (!resize_conpty(ws_row, ws_col, fd, state)) {
+    if (!resize_conpty(ws_row, ws_col, vte_ctx, state)) {
         SkDebugf("resize_conpty: failed to resize conpty\n");
         return;
     }
@@ -367,7 +375,7 @@ static void handle_size_change(ApplicationState* state, SDL_Window* window, SkCa
 }
 
 static void handle_sdl_events(ApplicationState* state, SDL_Window* window, SkCanvas** canvas, sk_sp<SkImage>* starImage,
-                              int* rotation, socket_t fd, struct tsm_screen* screen, struct tsm_vte* vte) {
+                              int* rotation, TsmVteCtx* vte_ctx, struct tsm_screen* screen, struct tsm_vte* vte) {
     SDL_Event event;
     while (SDL_PollEvent(&event)) {
         switch (event.type) {
@@ -406,13 +414,13 @@ static void handle_sdl_events(ApplicationState* state, SDL_Window* window, SkCan
                         state->fFontSize += 1.0 / state->fWidthScale;
                         gFont->setSize(state->fFontSize);
                         gFontBold->setSize(state->fFontSize);
-                        handle_size_change(state, window, canvas, starImage, fd, screen, vte);
+                        handle_size_change(state, window, canvas, starImage, vte_ctx, screen, vte);
                         return;
                     } else if (key == SDLK_MINUS && (state->fFontSize - 1.0f) / state->fWidthScale >= 8.0) {
                         state->fFontSize -= 1.0 / state->fWidthScale;
                         gFont->setSize(state->fFontSize);
                         gFontBold->setSize(state->fFontSize);
-                        handle_size_change(state, window, canvas, starImage, fd, screen, vte);
+                        handle_size_change(state, window, canvas, starImage, vte_ctx, screen, vte);
                         return;
                     }
                 }
@@ -527,7 +535,7 @@ static void handle_sdl_events(ApplicationState* state, SDL_Window* window, SkCan
                 switch (event.window.event) {
                     case SDL_WINDOWEVENT_RESIZED:
                         // Use SDL_GL_GetDrawableSize to measure the layout change
-                        handle_size_change(state, window, canvas, starImage, fd, screen, vte);
+                        handle_size_change(state, window, canvas, starImage, vte_ctx, screen, vte);
                         break;
                     default:
                         SkDebugf("sdl: window event 0x%x\n", event.window.event);
@@ -618,101 +626,30 @@ HRESULT WriteFileN(HANDLE hFile, LPCVOID lpBuffer, DWORD nNumberOfBytesToWrite, 
     return hr;
 }
 
-void __cdecl send_wndc(LPVOID lp) {
-    ApplicationState *state { reinterpret_cast<ApplicationState*>(lp) };
-    sk_sp<WinListenContext> listen_ctx = state->fListenCtx;
+HRESULT ReadFileN(HANDLE hFile, LPVOID lpBuffer, DWORD nNumberOfBytesToRead, LPDWORD lpNumberOfBytesRead,
+                  LPOVERLAPPED lpOverlapped, bool *should_retry) {
+    DWORD numberOfBytesRead;
     HRESULT hr = S_OK;
+    *lpNumberOfBytesRead = 0;
+    *should_retry = false;
 
-    const DWORD BUFF_SIZE{ 512 };
-    char szBuffer[BUFF_SIZE]{};
-
-    DWORD dwBytesWritten{};
-    DWORD dwBytesRead{};
-    BOOL fRead{ FALSE };
-    OVERLAPPED ovWrite = {};
-
-    do
-    {
-        // Read from the pipe
-        fRead = ::ReadFile(listen_ctx->outPipeOurSide, szBuffer, BUFF_SIZE, &dwBytesRead, nullptr);
-        SkDebugf("ReadFile(): read stdout %d\n", static_cast<int>(dwBytesRead));
-        if (!fRead) {
-            break;
-        }
-        hr = WriteFileN(reinterpret_cast<HANDLE>(listen_ctx->socket), szBuffer, dwBytesRead, &dwBytesWritten, &ovWrite);
-        if (FAILED(hr)) {
-            SkDebugf("WriteFileN(): write tsm error %s\n",
-                     std::system_category().message(hr).c_str());
-            break;
-        }
-        SkDebugf("WriteFileN(): write tsm %d\n", static_cast<int>(dwBytesWritten));
-
-    } while (fRead);
-
-    SkDebugf("send EOF\n");
-    state->fQuit = true;
-}
-
-void __cdecl recv_wndc(LPVOID lp) {
-    ApplicationState *state { reinterpret_cast<ApplicationState*>(lp) };
-    sk_sp<WinListenContext> listen_ctx = state->fListenCtx;
-    HRESULT hr = S_OK;
-    int err;
-
-    const DWORD BUFF_SIZE{ 512 };
-    char szBuffer[BUFF_SIZE]{};
-
-    DWORD dwBytesWritten{};
-    DWORD dwBytesRead{};
-    BOOL fRead{ FALSE };
-    OVERLAPPED ovRead = {};
-    int maxfd = listen_ctx->socket;
-
-    fd_set rfds ,efds;
-    do
-    {
-        FD_ZERO(&rfds);
-        FD_ZERO(&efds);
-        FD_SET(listen_ctx->socket, &rfds);
-        FD_SET(listen_ctx->socket, &efds);
-        int retVal = select(maxfd + 1, &rfds, nullptr, &efds, NULL);
-        if (retVal == -1) {
-            err = WSAGetLastError();
-            SkDebugf("select(): read tsm error %s\n",
-                     std::system_category().message(err).c_str());
-            break;
-        } else if (retVal == 0) {
-            /* No data/event to socket */
-            fRead = true;
-            continue;
-        } else if (FD_ISSET(listen_ctx->socket, &efds)) {
-            err = WSAGetLastError();
-            SkDebugf("select(): tsm socket error %s\n",
-                     std::system_category().message(err).c_str());
-            break;
-        }
-        // Write received text to the Console
-        // Note: Write to the Console using WriteFile(hConsole...), not printf()/puts() to
-        // prevent partially-read VT sequences from corrupting output
-        fRead = ::ReadFile(reinterpret_cast<HANDLE>(listen_ctx->socket), szBuffer, BUFF_SIZE, &dwBytesRead, &ovRead);
-        if (!fRead) {
+    while (nNumberOfBytesToRead) {
+        numberOfBytesRead = 0;
+        if (!::ReadFile(hFile, lpBuffer, nNumberOfBytesToRead, &numberOfBytesRead, lpOverlapped)) {
+            // handle with GetLastError() == ERROR_IO_PENDING
             int lastError = GetLastError();
             if (lastError == ERROR_IO_PENDING) {
-                fRead = true;
-                continue;
+                *should_retry = true;
             }
             hr = HRESULT_FROM_WIN32(lastError);
-            SkDebugf("ReadFile(): read tsm error %s\n",
-                     std::system_category().message(hr).c_str());
-            break;
+            return hr;
         }
-        SkDebugf("ReadFile(): read tsm %d\n", static_cast<int>(dwBytesRead));
-        ::WriteFile(listen_ctx->inPipeOurSide, szBuffer, dwBytesRead, &dwBytesWritten, nullptr);
-        SkDebugf("WriteFile(): stdin %d\n", static_cast<int>(dwBytesWritten));
-    } while (fRead);
 
-    SkDebugf("recv EOF\n");
-    state->fQuit = true;
+        *lpNumberOfBytesRead += numberOfBytesRead;
+        lpBuffer = reinterpret_cast<char*>(lpBuffer) + numberOfBytesRead;
+        nNumberOfBytesToRead -= numberOfBytesRead;
+    }
+    return hr;
 }
 
 void __cdecl monitor_wndc(LPVOID lp) {
@@ -740,91 +677,6 @@ void __cdecl monitor_wndc(LPVOID lp) {
 gone:
     SkDebugf("monitor EOF\n");
     state->fQuit = true;
-}
-
-// inspired by vim's channel.c
-#pragma comment(lib, "Ws2_32.lib")
-int socketpair(SOCKET *sfd, SOCKET *cfd) {
-    //-------------------------
-    // Initialize Winsock
-    WSADATA wsaData;
-    int iResult;
-
-    iResult = WSAStartup(MAKEWORD(2,2), &wsaData);
-    if (iResult != NO_ERROR) {
-        int err = WSAGetLastError();
-        SkDebugf("WSAStartup(): %s\n", std::system_category().message(err).c_str());
-        return -1;
-    }
-
-    SOCKET fd = INVALID_SOCKET, accepted_fd = INVALID_SOCKET, server_fd = INVALID_SOCKET;
-    struct sockaddr_in server {}, client {};
-    int client_len = sizeof(client), server_len = sizeof(server);
-    u_long val = 1;
-
-    fd = ::socket(AF_INET, SOCK_STREAM, 0);
-    if (fd == INVALID_SOCKET) {
-        int err = WSAGetLastError();
-        SkDebugf("socket(): %s\n", std::system_category().message(err).c_str());
-        goto fail;
-    }
-    server_fd = ::socket(AF_INET, SOCK_STREAM, 0);
-    if (server_fd == INVALID_SOCKET) {
-        int err = WSAGetLastError();
-        SkDebugf("socket(): %s\n", std::system_category().message(err).c_str());
-        goto fail;
-    }
-
-    server.sin_family = AF_INET;
-    server.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    server.sin_port = htons(0);
-
-    val = 1;
-    if (::bind(fd, (struct sockaddr*)&server, sizeof(server)) < 0 ||
-        ::listen(fd, 1) < 0 ||
-        ::getsockname(fd, (struct sockaddr*)&server, &server_len) < 0 ||
-        ::ioctlsocket(server_fd, FIONBIO, &val) < 0) /* Make connect() non-blocking. */ {
-        int err = WSAGetLastError();
-        SkDebugf("bind(): %s\n", std::system_category().message(err).c_str());
-        goto fail;
-    }
-
-    if (::connect(server_fd, (struct sockaddr*)&server, sizeof(server)) < 0) {
-        int err = WSAGetLastError();
-        if (err != WSAEWOULDBLOCK && err != WSAEINPROGRESS && err != WSAEINTR) {
-            SkDebugf("connect(): %s\n", std::system_category().message(err).c_str());
-            goto fail;
-        }
-    }
-
-    val = 1;
-    if ((accepted_fd = ::accept(fd, (struct sockaddr*)&client, &client_len)) == INVALID_SOCKET ||
-        ::ioctlsocket(accepted_fd, FIONBIO, &val) < 0) /* Make connect() non-blocking. */ {
-        int err = WSAGetLastError();
-        SkDebugf("accept(): %s\n", std::system_category().message(err).c_str());
-        goto fail;
-    }
-
-    // TODO check accept socket
-
-    ::closesocket(fd);
-    *sfd = accepted_fd;
-    *cfd = server_fd;
-
-    return 0;
-
-fail:
-    if (fd != INVALID_SOCKET)
-        ::closesocket(fd);
-    if (accepted_fd != INVALID_SOCKET)
-        ::closesocket(accepted_fd);
-    if (server_fd != INVALID_SOCKET)
-        ::closesocket(server_fd);
-
-    *sfd = INVALID_SOCKET;
-    *cfd = INVALID_SOCKET;
-
-    return -1;
 }
 
 // conpty: MakeNativeInterface
@@ -855,14 +707,13 @@ static bool init_conpty(ApplicationState *state) {
 }
 
 // conpty: MakeSurface
-static bool create_conpty(int ws_row, int ws_col, socket_t *fd, ApplicationState *state) {
+static bool create_conpty(int ws_row, int ws_col, TsmVteCtx *vte_ctx, ApplicationState *state) {
     BOOL fSuccess;
     HRESULT hr = S_OK;
     HANDLE outPipeOurSide, inPipeOurSide;
     HANDLE outPipePseudoConsoleSide, inPipePseudoConsoleSide;
     HPCON hPC = 0;
     COORD consize;
-    SOCKET client;
     sk_sp<WinListenContext> listen_ctx = state->fListenCtx;
     STARTUPINFOEXW startupInfoEx {};
     wchar_t expanded_commandline[MAX_PATH];
@@ -935,23 +786,13 @@ static bool create_conpty(int ws_row, int ws_col, socket_t *fd, ApplicationState
     listen_ctx->hPC = hPC;
     listen_ctx->hThread = process_information.hThread;
     listen_ctx->hProcess = process_information.hProcess;
-    if (socketpair(&listen_ctx->socket, &client) < 0) {
-        SkDebugf("conpty: socketpair failed\n");
-        fSuccess = false;
-        ::CloseHandle(inPipeOurSide);
-        ::CloseHandle(outPipeOurSide);
-        goto cleanup;
-    }
-    *fd = client;
+    vte_ctx->outPipeOurSide = outPipeOurSide;
+    vte_ctx->inPipeOurSide = inPipeOurSide;
 
     // Create & start thread to listen to the incoming pipe
     // Note: Using CRT-safe _beginthread() rather than CreateThread()
     state->fMonitorThread = reinterpret_cast<HANDLE>(_beginthread(monitor_wndc, 0, state));
     SkDebugf("monitor thread began\n");
-    state->fSendThread = reinterpret_cast<HANDLE>(_beginthread(send_wndc, 0, state));
-    SkDebugf("send thread began\n");
-    state->fRecvThread = reinterpret_cast<HANDLE>(_beginthread(recv_wndc, 0, state));
-    SkDebugf("recv thread began\n");
 
 cleanup:
     ::DeleteProcThreadAttributeList(startupInfoEx.lpAttributeList);
@@ -961,7 +802,7 @@ cleanup:
     return fSuccess;
 }
 
-static bool resize_conpty(int ws_row, int ws_col, socket_t /*fd*/, ApplicationState *state) {
+static bool resize_conpty(int ws_row, int ws_col, TsmVteCtx */*ctx*/, ApplicationState *state) {
     sk_sp<WinListenContext> listen_ctx = state->fListenCtx;
     COORD consize;
     HRESULT hr = S_OK;
@@ -982,7 +823,7 @@ static bool resize_conpty(int ws_row, int ws_col, socket_t /*fd*/, ApplicationSt
     return true;
 }
 
-static void close_conpty(socket_t /*fd*/, ApplicationState *state) {
+static void close_conpty(TsmVteCtx */*ctx*/, ApplicationState *state) {
     sk_sp<WinListenContext> listen_ctx = state->fListenCtx;
 
     // Close ConPTY - this will terminate client process if running
@@ -991,7 +832,6 @@ static void close_conpty(socket_t /*fd*/, ApplicationState *state) {
     // Clean-up the pipes
     ::CloseHandle(listen_ctx->inPipeOurSide);
     ::CloseHandle(listen_ctx->outPipeOurSide);
-    ::closesocket(listen_ctx->socket);
     // Now safe to clean-up client app's process-info & thread
     ::CloseHandle(listen_ctx->hThread);
     ::TerminateProcess(listen_ctx->hProcess, /*uExitCode*/ 0);
@@ -1003,7 +843,8 @@ static bool init_conpty(ApplicationState *state) {
     return true;
 }
 
-static bool create_conpty(int ws_row, int ws_col, socket_t *fd, ApplicationState *state) {
+static bool create_conpty(int ws_row, int ws_col, TsmVteCtx *ctx, ApplicationState *state) {
+    int *fd = &ctx->fd;
     struct termios term;
     struct winsize ws;
     memset(&term, 0, sizeof(term));
@@ -1067,7 +908,8 @@ static bool create_conpty(int ws_row, int ws_col, socket_t *fd, ApplicationState
     return true;
 }
 
-static bool resize_conpty(int ws_row, int ws_col, socket_t fd, ApplicationState *state) {
+static bool resize_conpty(int ws_row, int ws_col, TsmVteCtx *ctx, ApplicationState *state) {
+    int fd = ctx->fd;
     struct winsize ws;
     memset(&ws, 0, sizeof(ws));
 
@@ -1083,7 +925,8 @@ static bool resize_conpty(int ws_row, int ws_col, socket_t fd, ApplicationState 
     return true;
 }
 
-static void close_conpty(socket_t fd, ApplicationState *state) {
+static void close_conpty(TsmVteCtx *ctx, ApplicationState *state) {
+    int fd = ctx->fd;
     pid_t pid = state->fPid;
     int ret;
     int wstatus;
@@ -1141,46 +984,46 @@ void log_tsm(void* data, const char* file, int line, const char* fn,
     SkDebugf("%s\n", buffer);
 }
 
-struct TsmVteCtx {
-    ApplicationState *state;
-    socket_t fd;
-};
-
 #if defined(SK_BUILD_FOR_WIN)
 static void term_write_cb(struct tsm_vte* vte, const char* u8, size_t len, void* data) {
     auto state = reinterpret_cast<TsmVteCtx*>(data)->state;
-    socket_t fd = reinterpret_cast<TsmVteCtx*>(data)->fd;
-    int send_len = send(fd, u8, len, 0);
-    if (send_len < 0) {
-        int err = WSAGetLastError();
-        if (err != WSAEWOULDBLOCK && err != WSAEINPROGRESS && err != WSAEINTR) {
-            SkDebugf("term_write_cb: send %s\n",
-                     std::system_category().message(err).c_str());
-            state->fQuit = true;
-        }
-    } else if (send_len < static_cast<int>(len)) {
-        SkDebugf("term_write_cb: partial send %d expected %d\n",
-                 send_len, static_cast<int>(len));
+    HANDLE inPipeOurSide = reinterpret_cast<TsmVteCtx*>(data)->inPipeOurSide;
+    DWORD dwBytesWritten{};
+
+    OVERLAPPED ovWrite = {};
+
+    HRESULT hr = ::WriteFileN(inPipeOurSide, u8, len, &dwBytesWritten, &ovWrite);
+    if (FAILED(hr)) {
+        SkDebugf("term_write_cb: WriteFile %s\n",
+                 std::system_category().message(hr).c_str());
+        state->fQuit = true;
+    } else if (dwBytesWritten < len) {
+        SkDebugf("term_write_cb: partial WriteFile %lu expected %llu\n",
+                 dwBytesWritten, len);
         state->fQuit = true;
     }
 }
-static long term_read_cb(struct tsm_vte* vte, char* u8, size_t len, SOCKET fd,
-                         bool *is_eof, bool *should_retry) {
-    long ret = recv(fd, u8, len, 0);
-    if (ret == 0) {
-        SkDebugf("term_read_cb: read EOF\n");
+static long term_read_cb(struct tsm_vte* vte, char* u8, size_t len, bool *is_eof,
+                         bool *should_retry, void *data) {
+    HANDLE outPipeOurSide = reinterpret_cast<TsmVteCtx*>(data)->outPipeOurSide;
+    DWORD dwBytesRead{};
+    OVERLAPPED ovRead;
+
+    HRESULT hr = ::ReadFileN(outPipeOurSide, u8, len, &dwBytesRead, &ovRead, should_retry);
+
+    if (*should_retry)
+        return dwBytesRead;
+
+    if (FAILED(hr)) {
+        SkDebugf("term_read_cb: ReadFile %s\n",
+                 std::system_category().message(hr).c_str());
         *is_eof = true;
-    } else if (ret < 0) {
-        int err = WSAGetLastError();
-        if (err != WSAEWOULDBLOCK && err != WSAEINPROGRESS && err != WSAEINTR) {
-            SkDebugf("term_read_cb: recv %s\n",
-                     std::system_category().message(err).c_str());
-            *is_eof = true;
-        } else {
-            *should_retry = true;
-        }
+        return dwBytesRead;
     }
-    return ret;
+
+    *is_eof = false;
+
+    return dwBytesRead;
 }
 #else
 static void term_write_cb(struct tsm_vte* vte, const char* u8, size_t len, void* data) {
@@ -1207,8 +1050,9 @@ static void term_write_cb(struct tsm_vte* vte, const char* u8, size_t len, void*
     }
 }
 
-static long term_read_cb(struct tsm_vte* vte, char* u8, size_t len, socket_t fd,
-                         bool *is_eof, bool *should_retry) {
+static long term_read_cb(struct tsm_vte* vte, char* u8, size_t len, bool *is_eof,
+                         bool *should_retry, void *data) {
+    socket_t fd = reinterpret_cast<TsmVteCtx*>(data)->fd;
     long ret;
     do {
       ret = read(fd, u8, len);
@@ -1933,7 +1777,12 @@ int main(int argc, char** argv) {
 
     sk_sp<SkImage> starImage = draw_star_image(canvas, DEFAULT_STAR_RADIUS);
 
+#ifdef SK_BUILD_FOR_WIN
+    TsmVteCtx vte_ctx { &state, INVALID_HANDLE_VALUE, INVALID_HANDLE_VALUE };
+#else
     TsmVteCtx vte_ctx { &state, invalid_socket_t };
+#endif
+
     int ws_row = std::floorf((float)(state.fDm.w) / state.fFontAdvanceWidth);
     int ws_col = std::floorf((float)(state.fDm.h - state.fFontSpacing) / (state.fFontSize + state.fFontSpacing));
 
@@ -1948,7 +1797,7 @@ int main(int argc, char** argv) {
         SkDebugf("init: failed to initialize conpty\n");
         return -1;
     }
-    if (!create_conpty(ws_row, ws_col, &vte_ctx.fd, &state)) {
+    if (!create_conpty(ws_row, ws_col, &vte_ctx, &state)) {
         SkDebugf("init: failed to create conpty\n");
         return -1;
     }
@@ -2000,7 +1849,7 @@ int main(int argc, char** argv) {
         state.fRedrawRequired = false;
 
         canvas->clear(term_get_default_bc());
-        handle_sdl_events(&state, window, &canvas, &starImage, &rotation, vte_ctx.fd, screen, vte);
+        handle_sdl_events(&state, window, &canvas, &starImage, &rotation, &vte_ctx, screen, vte);
         if (state.fQuit) {
             break;
         }
@@ -2008,7 +1857,7 @@ int main(int argc, char** argv) {
         long ret = -1;
         char buf[4096];
         bool is_eof = false, should_retry = false;
-        ret = term_read_cb(vte, buf, sizeof(buf), vte_ctx.fd, &is_eof, &should_retry);
+        ret = term_read_cb(vte, buf, sizeof(buf), &is_eof, &should_retry, &vte_ctx);
         if (ret > 0) {
 #if 0
             SkDebugf("term_read_cb: %ld\n", ret);
@@ -2061,15 +1910,11 @@ redraw_queued:
         SDL_RemoveTimer(timerId);
     }
 
-    close_conpty(vte_ctx.fd, &state);
+    close_conpty(&vte_ctx, &state);
 
 #ifdef SK_BUILD_FOR_WIN
     WaitForSingleObject(state.fMonitorThread, INFINITE);
     SkDebugf("monitor thread exited\n");
-    WaitForSingleObject(state.fSendThread, INFINITE);
-    SkDebugf("send thread exited\n");
-    WaitForSingleObject(state.fRecvThread, INFINITE);
-    SkDebugf("recv thread exited\n");
 #endif
 
 #if 1
