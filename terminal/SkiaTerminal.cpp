@@ -168,7 +168,7 @@ struct ApplicationState {
 #else
     pid_t fPid;
 #endif
-    uint32_t fRedrawTimerId = 0x0;
+    SDL_Thread *fRedrawNotificationThread = NULL;
     SDL_Thread *fTermNotificationThread = NULL;
 };
 
@@ -1693,7 +1693,7 @@ int main(int argc, char** argv) {
     /*
      * In a real application you might want to initialize more subsystems
      */
-    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS | SDL_INIT_TIMER) != 0) {
+    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS) != 0) {
         handle_sdl_error();
         return 1;
     }
@@ -1937,32 +1937,24 @@ int main(int argc, char** argv) {
 
     int rotation = 0;
 
-    state.fRedrawTimerId = SDL_AddTimer(1000.0f / state.fDm.refresh_rate,
-                                        [](uint32_t, void *ctx) -> uint32_t {
-        auto state = reinterpret_cast<ApplicationState*>(ctx);
-        if (state->fQuit) {
-            SkDebugf("term_redraw canceled\n");
-            return 0;
-        }
-#if 0
-        SkDebugf("term_redraw required\n");
-#endif
+    state.fRedrawNotificationThread = SDL_CreateThread([](void *data) -> int {
+        auto state = reinterpret_cast<TsmVteCtx*>(data)->state;
+        SkDebugf("redraw-notification thread began\n");
+        while (!state->fQuit) {  // Our VSync loop
+            SDL_Delay(1000.0f / state->fDm.refresh_rate);
 
-        SDL_Event user_event;
-        SDL_zero(user_event); // Initialize the event structure
-        user_event.type = SDL_USEREVENT; // Custom event type
-        user_event.user.code = 1; // Custom code
-        user_event.user.data1 = NULL;
-        user_event.user.data2 = NULL;
+            SDL_Event user_event;
+            SDL_zero(user_event); // Initialize the event structure
+            user_event.type = SDL_USEREVENT; // Custom event type
+            user_event.user.code = 1; // Custom code
+            user_event.user.data1 = NULL;
+            user_event.user.data2 = NULL;
 
-        SDL_PushEvent(&user_event);
-        return 1000.0f / state->fDm.refresh_rate;
-    }, &state);
-
-    if (state.fRedrawTimerId == 0) {
-        SkDebugf("sdl: failed to create redraw timer\n");
-        return 1;
-    }
+            SDL_PushEvent(&user_event);
+        };
+        SkDebugf("redraw-notification thread exited\n");
+        return 0;
+    }, "redraw-notification", &vte_ctx);
 
     state.fTermNotificationThread = SDL_CreateThread([](void *data) -> int {
         auto state = reinterpret_cast<TsmVteCtx*>(data)->state;
@@ -2076,7 +2068,7 @@ redraw_queued:
 
     close_conpty(&vte_ctx, &state);
 
-    SDL_RemoveTimer(state.fRedrawTimerId);
+    SDL_WaitThread(state.fRedrawNotificationThread, NULL);
     SDL_WaitThread(state.fTermNotificationThread, NULL);
 
 #ifdef SK_BUILD_FOR_WIN
