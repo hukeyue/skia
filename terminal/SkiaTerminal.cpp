@@ -826,6 +826,7 @@ static bool create_conpty(int ws_row, int ws_col, TsmVteCtx *vte_ctx, Applicatio
     if (FAILED(hr)) {
         SkDebugf("conpty: InitializeStartupInfoAttachedToConPTY %s\n",
                  std::system_category().message(hr).c_str());
+        listen_ctx->fClosePseudoConsole(hPC);
         ::CloseHandle(inPipeOurSide);
         ::CloseHandle(outPipeOurSide);
         ::CloseHandle(inPipePseudoConsoleSide);
@@ -852,6 +853,7 @@ static bool create_conpty(int ws_row, int ws_col, TsmVteCtx *vte_ctx, Applicatio
         hr = HRESULT_FROM_WIN32(GetLastError());
         SkDebugf("conpty: CreateProcessW %s\n",
                  std::system_category().message(hr).c_str());
+        listen_ctx->fClosePseudoConsole(hPC);
         ::CloseHandle(inPipeOurSide);
         ::CloseHandle(outPipeOurSide);
         goto cleanup;
