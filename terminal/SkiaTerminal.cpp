@@ -101,6 +101,8 @@ extern char **environ;
 
 #define DEFAULT_NAMED_PIPE_PREFIX "\\\\.\\pipe\\skTerminal-%lu-%s"
 
+#define DEFAULT_PIPE_BUFFER 4096
+
 #ifdef SK_BUILD_FOR_WIN
 typedef std::pair<int, int> SkDPI;
 static HRESULT retrieveDPI(SkDPI *dpi, RECT *rect = nullptr);
@@ -149,7 +151,7 @@ struct ApplicationState {
     std::atomic_bool fQuit;
     bool fRedrawRequired = false;
     bool fRedrawQueued = false;
-    uint32_t fRedrawTimerId = 0x0;
+    bool fShouldRetry = false;
     float fFontSize;
     float fFontAdvanceWidth;
     float fFontSpacing;
@@ -164,8 +166,10 @@ struct ApplicationState {
     sk_sp<WinListenContext> fListenCtx;
     HANDLE fMonitorThread;
 #else
-    int fPid;
+    pid_t fPid;
 #endif
+    uint32_t fRedrawTimerId = 0x0;
+    SDL_Thread *fTermNotificationThread = NULL;
 };
 
 struct TsmVteCtx {
@@ -368,6 +372,9 @@ static void handle_size_change(ApplicationState* state, SDL_Window* window, SkCa
     state->fRedrawRequired = true;
 }
 
+static long term_read_cb(struct tsm_vte* vte, char* u8, size_t len, bool *is_eof,
+                         bool *should_retry, TsmVteCtx *vte_ctx);
+
 static void handle_sdl_events(ApplicationState* state, SDL_Window* window, SkCanvas** canvas, sk_sp<SkImage>* starImage,
                               int* rotation, TsmVteCtx* vte_ctx, struct tsm_screen* screen, struct tsm_vte* vte) {
     SDL_Event event;
@@ -539,7 +546,7 @@ static void handle_sdl_events(ApplicationState* state, SDL_Window* window, SkCan
             }
             case SDL_QUIT:
                 state->fQuit = true;
-                break;
+                return;
             case SDL_USEREVENT:
 #if 0
                 SkDebugf("term_redraw queued\n");
@@ -547,6 +554,29 @@ static void handle_sdl_events(ApplicationState* state, SDL_Window* window, SkCan
                 state->fRedrawQueued = true;
                 ++*rotation;
                 break;
+            case SDL_USEREVENT + 1: {
+#if 0
+                SkDebugf("io_event queued\n");
+#endif
+                long ret = -1;
+                char buf[DEFAULT_PIPE_BUFFER];
+                bool is_eof = false, should_retry = false;
+                ret = term_read_cb(vte, buf, sizeof(buf), &is_eof, &should_retry, vte_ctx);
+                if (ret > 0) {
+#if 0
+                    SkDebugf("term_read_cb: %ld\n", ret);
+#endif
+                    tsm_vte_input(vte, buf, ret);
+                    SkDebugf("term_redraw required\n");
+                    state->fRedrawRequired = true;
+                } else if (should_retry) {
+                    state->fShouldRetry = true;
+                } else if (ret < 0 || is_eof) {
+                    state->fQuit = true;
+                    return;
+                }
+                break;
+            }
             default:
                 break;
         }
@@ -650,6 +680,7 @@ void __cdecl monitor_wndc(LPVOID lp) {
     ApplicationState *state { reinterpret_cast<ApplicationState*>(lp) };
     sk_sp<WinListenContext> listen_ctx = state->fListenCtx;
     HRESULT hr = S_OK;
+    SkDebugf("monitor thread began\n");
 
     while (!state->fQuit) {
       DWORD retVal = WaitForSingleObject(listen_ctx->hProcess, INFINITE);
@@ -669,7 +700,7 @@ void __cdecl monitor_wndc(LPVOID lp) {
     }
 
 gone:
-    SkDebugf("monitor EOF\n");
+    SkDebugf("monitor thread exited\n");
     state->fQuit = true;
 }
 
@@ -718,7 +749,8 @@ static BOOL SKCreateNamedPipe(HANDLE *readSide, HANDLE *writeSide, DWORD process
     *stop = '\0';
 
     hPipeServer = ::CreateNamedPipeA(buffer, PIPE_ACCESS_INBOUND | FILE_FLAG_OVERLAPPED,
-                                     PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT, 1, 4096, 4096, 0, NULL);
+                                     PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT, 1,
+                                     DEFAULT_PIPE_BUFFER, DEFAULT_PIPE_BUFFER, 0, NULL);
     if (hPipeServer == INVALID_HANDLE_VALUE) {
         hr = HRESULT_FROM_WIN32(GetLastError());
         SkDebugf("CreateNamedPipeA %s\n",
@@ -745,7 +777,7 @@ static BOOL SKCreateNamedPipe(HANDLE *readSide, HANDLE *writeSide, DWORD process
                  std::system_category().message(hr).c_str());
     }
 
-    hPipeClient = ::CreateFileA(buffer, GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
+    hPipeClient = ::CreateFileA(buffer, GENERIC_WRITE, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     if (hPipeClient == INVALID_HANDLE_VALUE) {
         hr = HRESULT_FROM_WIN32(GetLastError());
         SkDebugf("CreateFileA %s\n",
@@ -870,7 +902,6 @@ static bool create_conpty(int ws_row, int ws_col, TsmVteCtx *vte_ctx, Applicatio
     // Create & start thread to listen to the incoming pipe
     // Note: Using CRT-safe _beginthread() rather than CreateThread()
     state->fMonitorThread = reinterpret_cast<HANDLE>(_beginthread(monitor_wndc, 0, state));
-    SkDebugf("monitor thread began\n");
 
 cleanup:
     ::DeleteProcThreadAttributeList(startupInfoEx.lpAttributeList);
@@ -1082,8 +1113,8 @@ static void term_write_cb(struct tsm_vte* vte, const char* u8, size_t len, void*
     }
 }
 static long term_read_cb(struct tsm_vte* vte, char* u8, size_t len, bool *is_eof,
-                         bool *should_retry, void *data) {
-    HANDLE outPipeOurSide = reinterpret_cast<TsmVteCtx*>(data)->outPipeOurSide;
+                         bool *should_retry, TsmVteCtx *vte_ctx) {
+    HANDLE outPipeOurSide = vte_ctx->outPipeOurSide;
     DWORD dwBytesRead{};
     HRESULT hr;
 
@@ -1139,8 +1170,8 @@ static void term_write_cb(struct tsm_vte* vte, const char* u8, size_t len, void*
 }
 
 static long term_read_cb(struct tsm_vte* vte, char* u8, size_t len, bool *is_eof,
-                         bool *should_retry, void *data) {
-    int fd = reinterpret_cast<TsmVteCtx*>(data)->fd;
+                         bool *should_retry, TsmVteCtx *vte_ctx) {
+    int fd = vte_ctx->fd;
     long ret;
     do {
       ret = read(fd, u8, len);
@@ -1933,8 +1964,69 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    state.fTermNotificationThread = SDL_CreateThread([](void *data) -> int {
+        auto state = reinterpret_cast<TsmVteCtx*>(data)->state;
+        SkDebugf("term-notification thread began\n");
+#ifdef SK_BUILD_FOR_WIN
+        HANDLE outPipeOurSide = reinterpret_cast<TsmVteCtx*>(data)->outPipeOurSide;
+        HRESULT hr;
+        while (!state->fQuit) {  // Our I/O loop
+            DWORD retVal = ::WaitForSingleObject(outPipeOurSide, 4 + /*INFINITE*/ 2 + 2);
+            switch (retVal) {
+                case WAIT_OBJECT_0:
+                case WAIT_TIMEOUT:
+                    break;
+                case WAIT_FAILED:
+                default:
+                    hr = HRESULT_FROM_WIN32(GetLastError());
+                    SkDebugf("WaitForSingleObject %s\n",
+                             std::system_category().message(hr).c_str());
+                    return -1;
+            }
+
+            SDL_Event user_event;
+            SDL_zero(user_event); // Initialize the event structure
+            user_event.type = SDL_USEREVENT + 1; // Custom event type
+            user_event.user.code = 1; // Custom code
+            user_event.user.data1 = NULL;
+            user_event.user.data2 = NULL;
+
+            SDL_PushEvent(&user_event);
+        };
+#else
+        int fd = reinterpret_cast<TsmVteCtx*>(data)->fd;
+        int maxfd = fd;
+        fd_set rfds;
+        while (!state->fQuit) {  // Our I/O loop
+            FD_ZERO(&rfds);
+            FD_SET(fd, &rfds);
+            int retVal = ::select(maxfd + 1, &rfds, NULL, NULL, NULL);
+            if (retVal == -1) {
+                SkDebugf("select: %s\n",
+                         std::system_category().message(errno).c_str());
+                return -1;
+            } else if (retVal == 0) {
+                continue;
+            }
+            SkASSERT(FD_ISSET(fd, &rfds));
+
+            SDL_Event user_event;
+            SDL_zero(user_event); // Initialize the event structure
+            user_event.type = SDL_USEREVENT + 1; // Custom event type
+            user_event.user.code = 1; // Custom code
+            user_event.user.data1 = NULL;
+            user_event.user.data2 = NULL;
+
+            SDL_PushEvent(&user_event);
+        };
+#endif
+        SkDebugf("term-notification thread exited\n");
+        return 0;
+    }, "term-notification", &vte_ctx);
+
     while (!state.fQuit) {  // Our application loop
         state.fRedrawRequired = false;
+        state.fShouldRetry = false;
 
         canvas->clear(term_get_default_bc());
         handle_sdl_events(&state, window, &canvas, &starImage, &rotation, &vte_ctx, screen, vte);
@@ -1942,24 +2034,12 @@ int main(int argc, char** argv) {
             break;
         }
 
-        long ret = -1;
-        char buf[4096];
-        bool is_eof = false, should_retry = false;
-        ret = term_read_cb(vte, buf, sizeof(buf), &is_eof, &should_retry, &vte_ctx);
-        if (ret > 0) {
-#if 0
-            SkDebugf("term_read_cb: %ld\n", ret);
-#endif
-            tsm_vte_input(vte, buf, ret);
-            SkDebugf("term_redraw required\n");
-            state.fRedrawRequired = true;
-        } else if (state.fRedrawQueued && !is_eof) {
+        if (state.fRedrawQueued) {
             goto redraw_queued;
-        } else if (should_retry) {
+        }
+
+        if (state.fShouldRetry) {
             goto should_retry;
-        } else {
-            SkASSERT(is_eof);
-            break;
         }
 
 should_retry:
@@ -1994,15 +2074,13 @@ redraw_queued:
         SDL_GL_SwapWindow(window);
     }
 
-    if (uint32_t timerId = state.fRedrawTimerId; timerId != 0) {
-        SDL_RemoveTimer(timerId);
-    }
-
     close_conpty(&vte_ctx, &state);
+
+    SDL_RemoveTimer(state.fRedrawTimerId);
+    SDL_WaitThread(state.fTermNotificationThread, NULL);
 
 #ifdef SK_BUILD_FOR_WIN
     WaitForSingleObject(state.fMonitorThread, INFINITE);
-    SkDebugf("monitor thread exited\n");
 #endif
 
 #if 1
