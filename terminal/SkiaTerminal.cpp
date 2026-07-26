@@ -799,11 +799,9 @@ static bool create_conpty(int ws_row, int ws_col, TsmVteCtx *vte_ctx, Applicatio
     DWORD processId = ::GetCurrentProcessId();
 
     // Create the in/out pipes:
-    if (!::SKCreateNamedPipe(&inPipePseudoConsoleSide, &inPipeOurSide, processId, "in") ||
-        !::SKCreateNamedPipe(&outPipeOurSide, &outPipePseudoConsoleSide, processId, "out")) {
-        hr = HRESULT_FROM_WIN32(GetLastError());
-        SkDebugf("conpty: CreatePipe %s\n",
-                 std::system_category().message(hr).c_str());
+    if (!SKCreateNamedPipe(&inPipePseudoConsoleSide, &inPipeOurSide, processId, "in") ||
+        !SKCreateNamedPipe(&outPipeOurSide, &outPipePseudoConsoleSide, processId, "out")) {
+        SkDebugf("conpty: SKCreateNamedPipe failed\n");
         return false;
     }
 
