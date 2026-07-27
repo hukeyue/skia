@@ -561,7 +561,8 @@ static void handle_sdl_events(ApplicationState* state, SDL_Window* window, SkCan
                 long ret = -1;
                 char buf[DEFAULT_PIPE_BUFFER];
                 bool is_eof = false, should_retry = false;
-                ret = term_read_cb(vte, buf, sizeof(buf), &is_eof, &should_retry, vte_ctx);
+                Sint32 len = std::min<Sint32>(event.user.code, sizeof(buf));
+                ret = term_read_cb(vte, buf, len, &is_eof, &should_retry, vte_ctx);
                 if (ret > 0) {
 #if 0
                     SkDebugf("term_read_cb: %ld\n", ret);
@@ -683,8 +684,8 @@ void __cdecl monitor_wndc(LPVOID lp) {
     SkDebugf("monitor thread began\n");
 
     while (!state->fQuit) {
-      DWORD retVal = WaitForSingleObject(listen_ctx->hProcess, INFINITE);
-      switch (retVal) {
+      DWORD ret = WaitForSingleObject(listen_ctx->hProcess, INFINITE);
+      switch (ret) {
         case WAIT_OBJECT_0:
             goto gone;
         case WAIT_FAILED:
@@ -1958,28 +1959,60 @@ int main(int argc, char** argv) {
 
     state.fTermNotificationThread = SDL_CreateThread([](void *data) -> int {
         auto state = reinterpret_cast<TsmVteCtx*>(data)->state;
+        int result = 0;
         SkDebugf("term-notification thread began\n");
 #ifdef SK_BUILD_FOR_WIN
         HANDLE outPipeOurSide = reinterpret_cast<TsmVteCtx*>(data)->outPipeOurSide;
+        DWORD dwBytesRead{};
         HRESULT hr;
         while (!state->fQuit) {  // Our I/O loop
-            DWORD retVal = ::WaitForSingleObject(outPipeOurSide, 4 + /*INFINITE*/ 2 + 2);
-            switch (retVal) {
-                case WAIT_OBJECT_0:
-                case WAIT_TIMEOUT:
-                    break;
-                case WAIT_FAILED:
-                default:
-                    hr = HRESULT_FROM_WIN32(GetLastError());
-                    SkDebugf("WaitForSingleObject %s\n",
-                             std::system_category().message(hr).c_str());
-                    return -1;
+            BOOL fSuccess = ::PeekNamedPipe(outPipeOurSide, NULL, 0, NULL, &dwBytesRead, NULL);
+            if (!fSuccess) {
+                hr = HRESULT_FROM_WIN32(GetLastError());
+                SkDebugf("PeekNamedPipe: %s\n",
+                         std::system_category().message(hr).c_str());
+                result = -1;
+                break;
+            } else if (dwBytesRead == 0) {
+                SDL_Delay(10.0f + 2);
+                continue;
             }
 
             SDL_Event user_event;
             SDL_zero(user_event); // Initialize the event structure
             user_event.type = SDL_USEREVENT + 1; // Custom event type
-            user_event.user.code = 1; // Custom code
+            user_event.user.code = dwBytesRead; // Custom code
+            user_event.user.data1 = NULL;
+            user_event.user.data2 = NULL;
+
+            SDL_PushEvent(&user_event);
+
+            SDL_Delay(10.0f + 2);
+        };
+#else
+#if 1
+        int fd = reinterpret_cast<TsmVteCtx*>(data)->fd;
+        int maxfd = fd;
+        fd_set rfds;
+        while (!state->fQuit) {  // Our I/O loop
+            FD_ZERO(&rfds);
+            FD_SET(fd, &rfds);
+            int ret = ::select(maxfd + 1, &rfds, NULL, NULL, NULL);
+            if (ret == -1) {
+                SkDebugf("select: %s\n",
+                         std::system_category().message(errno).c_str());
+                result = -1;
+                break;
+            } else if (ret == 0) {
+                SDL_Delay(10.0f + 2);
+                continue;
+            }
+            SkASSERT(FD_ISSET(fd, &rfds));
+
+            SDL_Event user_event;
+            SDL_zero(user_event); // Initialize the event structure
+            user_event.type = SDL_USEREVENT + 1; // Custom event type
+            user_event.user.code = DEFAULT_PIPE_BUFFER; // Custom code
             user_event.user.data1 = NULL;
             user_event.user.data2 = NULL;
 
@@ -1989,25 +2022,23 @@ int main(int argc, char** argv) {
         };
 #else
         int fd = reinterpret_cast<TsmVteCtx*>(data)->fd;
-        int maxfd = fd;
-        fd_set rfds;
         while (!state->fQuit) {  // Our I/O loop
-            FD_ZERO(&rfds);
-            FD_SET(fd, &rfds);
-            int retVal = ::select(maxfd + 1, &rfds, NULL, NULL, NULL);
-            if (retVal == -1) {
-                SkDebugf("select: %s\n",
+            int bytes;
+            int ret = ioctl(fd, FIONREAD, &bytes);
+            if (ret == -1) {
+                SkDebugf("ioctl: %s\n",
                          std::system_category().message(errno).c_str());
-                return -1;
-            } else if (retVal == 0) {
+                result = -1;
+                break;
+            } else if (bytes == 0) {
+                SDL_Delay(10.0f + 2);
                 continue;
             }
-            SkASSERT(FD_ISSET(fd, &rfds));
 
             SDL_Event user_event;
             SDL_zero(user_event); // Initialize the event structure
             user_event.type = SDL_USEREVENT + 1; // Custom event type
-            user_event.user.code = 1; // Custom code
+            user_event.user.code = bytes; // Custom code
             user_event.user.data1 = NULL;
             user_event.user.data2 = NULL;
 
@@ -2016,8 +2047,9 @@ int main(int argc, char** argv) {
             SDL_Delay(10.0f + 2);
         };
 #endif
+#endif
         SkDebugf("term-notification thread exited\n");
-        return 0;
+        return result;
     }, "term-notification", &vte_ctx);
 
     while (!state.fQuit) {  // Our application loop
