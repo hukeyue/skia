@@ -1941,8 +1941,6 @@ int main(int argc, char** argv) {
         auto state = reinterpret_cast<TsmVteCtx*>(data)->state;
         SkDebugf("redraw-notification thread began\n");
         while (!state->fQuit) {  // Our VSync loop
-            SDL_Delay(1000.0f / state->fDm.refresh_rate);
-
             SDL_Event user_event;
             SDL_zero(user_event); // Initialize the event structure
             user_event.type = SDL_USEREVENT; // Custom event type
@@ -1951,6 +1949,8 @@ int main(int argc, char** argv) {
             user_event.user.data2 = NULL;
 
             SDL_PushEvent(&user_event);
+
+            SDL_Delay(1000.0f / state->fDm.refresh_rate);
         };
         SkDebugf("redraw-notification thread exited\n");
         return 0;
@@ -1984,6 +1984,8 @@ int main(int argc, char** argv) {
             user_event.user.data2 = NULL;
 
             SDL_PushEvent(&user_event);
+
+            SDL_Delay(10.0f + 2);
         };
 #else
         int fd = reinterpret_cast<TsmVteCtx*>(data)->fd;
@@ -2010,6 +2012,8 @@ int main(int argc, char** argv) {
             user_event.user.data2 = NULL;
 
             SDL_PushEvent(&user_event);
+
+            SDL_Delay(10.0f + 2);
         };
 #endif
         SkDebugf("term-notification thread exited\n");
