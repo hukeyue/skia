@@ -1011,7 +1011,22 @@ static bool create_conpty(int ws_row, int ws_col, TsmVteCtx *ctx, ApplicationSta
     }
     state->fPid = pid;
 
-    fcntl(*fd, F_SETFL, O_NONBLOCK);
+#if 0
+    int ret = fcntl(*fd, F_SETFL, O_NONBLOCK | fcntl(*fd, F_GETFL));
+    if (ret < 0) {
+        errno_t cerrno = errno;
+        SkDebugf("fcntl: O_NONBLOCK %s\n",
+                 std::system_category().message(cerrno).c_str());
+    }
+#else
+    int arg = 1;
+    int ret = ioctl(*fd, FIONBIO, &arg);
+    if (ret < 0) {
+        errno_t cerrno = errno;
+        SkDebugf("ioctl: FIONBIO %s\n",
+                 std::system_category().message(cerrno).c_str());
+    }
+#endif
 
     SkDebugf("forkpty: pid %d\n", pid);
 
