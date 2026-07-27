@@ -211,6 +211,12 @@ static SkCanvas* glGetCanvas(int dw, int dh, uint32_t windowFormat, int contextT
         return nullptr;
     }
 
+#if 0
+    SkDebugf("SkCurrent GL Vendor: %s\n", glState->glInterface->fFunctions.fGetString(GR_GL_VENDOR));
+    SkDebugf("SkCurrent GL Render: %s\n", glState->glInterface->fFunctions.fGetString(GR_GL_RENDERER));
+    SkDebugf("SkCurrent GL Version: %s\n", glState->glInterface->fFunctions.fGetString(GR_GL_VERSION));
+#endif
+
     glState->glInterface->fFunctions.fViewport(0, 0, dw, dh);
     glState->glInterface->fFunctions.fClearColor(1, 1, 1, 1);
     glState->glInterface->fFunctions.fClearStencil(0);
