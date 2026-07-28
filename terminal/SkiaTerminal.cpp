@@ -878,6 +878,8 @@ static bool create_conpty(int ws_row, int ws_col, TsmVteCtx *vte_ctx, Applicatio
     vte_ctx->outPipeOurSide = outPipeOurSide;
     vte_ctx->inPipeOurSide = inPipeOurSide;
 
+    SkDebugf("CreateProcessW: process %lu\n", process_information.dwProcessId);
+
 cleanup:
     ::DeleteProcThreadAttributeList(startupInfoEx.lpAttributeList);
     delete[] (BYTE*)startupInfoEx.lpAttributeList;
