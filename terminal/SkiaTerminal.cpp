@@ -164,10 +164,10 @@ struct ApplicationState {
     int32_t fDh;
 #ifdef SK_BUILD_FOR_WIN
     sk_sp<WinListenContext> fListenCtx;
-    HANDLE fMonitorThread;
 #else
     pid_t fPid;
 #endif
+    SDL_Thread *fMonitorThread = NULL;
     SDL_Thread *fRedrawNotificationThread = NULL;
     SDL_Thread *fTermNotificationThread = NULL;
 };
@@ -683,34 +683,6 @@ HRESULT ReadFileN(HANDLE hFile, LPVOID lpBuffer, DWORD nNumberOfBytesToRead, LPD
     return hr;
 }
 
-void __cdecl monitor_wndc(LPVOID lp) {
-    ApplicationState *state { reinterpret_cast<ApplicationState*>(lp) };
-    sk_sp<WinListenContext> listen_ctx = state->fListenCtx;
-    HRESULT hr = S_OK;
-    SkDebugf("monitor thread began\n");
-
-    while (!state->fQuit) {
-      DWORD ret = WaitForSingleObject(listen_ctx->hProcess, INFINITE);
-      switch (ret) {
-        case WAIT_OBJECT_0:
-            goto gone;
-        case WAIT_FAILED:
-            hr = HRESULT_FROM_WIN32(GetLastError());
-            SkDebugf("WaitForSingleObject(): error %s\n",
-                     std::system_category().message(hr).c_str());
-            goto gone;
-        case WAIT_TIMEOUT:
-            break;
-        default:
-            break;
-      }
-    }
-
-gone:
-    SkDebugf("monitor thread exited\n");
-    state->fQuit = true;
-}
-
 // conpty: MakeNativeInterface
 static bool init_conpty(ApplicationState *state) {
     sk_sp<WinListenContext> listen_ctx = sk_make_sp<WinListenContext>();
@@ -906,10 +878,6 @@ static bool create_conpty(int ws_row, int ws_col, TsmVteCtx *vte_ctx, Applicatio
     vte_ctx->outPipeOurSide = outPipeOurSide;
     vte_ctx->inPipeOurSide = inPipeOurSide;
 
-    // Create & start thread to listen to the incoming pipe
-    // Note: Using CRT-safe _beginthread() rather than CreateThread()
-    state->fMonitorThread = reinterpret_cast<HANDLE>(_beginthread(monitor_wndc, 0, state));
-
 cleanup:
     ::DeleteProcThreadAttributeList(startupInfoEx.lpAttributeList);
     delete[] (BYTE*)startupInfoEx.lpAttributeList;
@@ -1060,7 +1028,6 @@ static void close_conpty(TsmVteCtx *ctx, ApplicationState *state) {
     int fd = ctx->fd;
     pid_t pid = state->fPid;
     int ret;
-    int wstatus;
 
     // Clean-up the pipes
     ret = close(fd);
@@ -1071,15 +1038,6 @@ static void close_conpty(TsmVteCtx *ctx, ApplicationState *state) {
     // Now safe to clean-up client app's process-info & thread
     ret = kill(pid, SIGKILL);
     static_cast<void>(ret); // better right way is to check with WNOHANG first, we don't bother it.
-
-    ret = waitpid(pid, &wstatus, 0);
-    if (ret >= 0) {
-        ret = WEXITSTATUS(wstatus);
-        SkDebugf("waitpid: pid %d exited code %d\n", pid, ret);
-    } else {
-        SkDebugf("waitpid: pid %d failed\n", pid);
-        static_cast<void>(ret);
-    }
 }
 #endif
 
@@ -1946,8 +1904,8 @@ int main(int argc, char** argv) {
     state.fCol = ws_col;
 
     // create a software-based virtual terminal
-    struct tsm_screen* screen = nullptr;
-    struct tsm_vte* vte;
+    struct tsm_screen* screen = NULL;
+    struct tsm_vte* vte = NULL;
 
     tsm_screen_new(&screen, log_tsm, screen);
     // increases scrollback size to 500k lines
@@ -1958,6 +1916,59 @@ int main(int argc, char** argv) {
     vte_color_palette_set_type(t_vte_color_palette_solarized_white);
 
     int rotation = 0;
+
+    state.fMonitorThread = SDL_CreateThread([](void *data) -> int {
+        auto state = reinterpret_cast<TsmVteCtx*>(data)->state;
+        SkDebugf("monitor thread began\n");
+#ifdef SK_BUILD_FOR_WIN
+        HRESULT hr = S_OK;
+        HANDLE hProcess = state->fListenCtx->hProcess;
+        DWORD processId = ::GetProcessId(hProcess);
+        DWORD exitCode = ~0;
+
+        DWORD ret = ::WaitForSingleObject(hProcess, INFINITE);
+        switch (ret) {
+            case WAIT_OBJECT_0:
+                break;
+            case WAIT_FAILED:
+            default:
+                hr = HRESULT_FROM_WIN32(GetLastError());
+                SkDebugf("WaitForSingleObject(): error %s\n",
+                         std::system_category().message(hr).c_str());
+                break;
+        }
+        if (SUCCEEDED(hr)) {
+            if (::GetExitCodeProcess(hProcess, &exitCode)) {
+                SkDebugf("GetExitCodeProcess: process %lu exited code %lu\n", processId, exitCode);
+            } else {
+                hr = HRESULT_FROM_WIN32(GetLastError());
+                SkDebugf("GetExitCodeProcess(): process %lu error %s\n", processId,
+                         std::system_category().message(hr).c_str());
+            }
+        }
+#else
+        pid_t pid = state->fPid;
+        int ret;
+        int wstatus, exitCode = -1;
+        ret = waitpid(pid, &wstatus, 0);
+        if (ret >= 0) {
+            exitCode = ret = WEXITSTATUS(wstatus);
+            SkDebugf("waitpid: pid %d exited code %d\n", pid, ret);
+        } else {
+            errno_t cerrno = errno;
+            SkDebugf("waitpid: pid %d %s\n",
+                     std::system_category().message(cerrno).c_str());
+        }
+#endif
+
+        SkDebugf("monitor thread exited\n");
+        state->fQuit = true;
+        return exitCode;
+    }, "monitor", &vte_ctx);
+    if (!state.fMonitorThread) {
+        handle_sdl_error();
+        return 1;
+    }
 
     state.fRedrawNotificationThread = SDL_CreateThread([](void *data) -> int {
         auto state = reinterpret_cast<TsmVteCtx*>(data)->state;
@@ -1977,6 +1988,10 @@ int main(int argc, char** argv) {
         SkDebugf("redraw-notification thread exited\n");
         return 0;
     }, "redraw-notification", &vte_ctx);
+    if (!state.fRedrawNotificationThread) {
+        handle_sdl_error();
+        return 1;
+    }
 
     state.fTermNotificationThread = SDL_CreateThread([](void *data) -> int {
         auto state = reinterpret_cast<TsmVteCtx*>(data)->state;
@@ -2072,6 +2087,10 @@ int main(int argc, char** argv) {
         SkDebugf("term-notification thread exited\n");
         return result;
     }, "term-notification", &vte_ctx);
+    if (!state.fTermNotificationThread) {
+        handle_sdl_error();
+        return 1;
+    }
 
     while (!state.fQuit) {  // Our application loop
         state.fRedrawRequired = false;
@@ -2127,10 +2146,17 @@ redraw_queued:
 
     SDL_WaitThread(state.fRedrawNotificationThread, NULL);
     SDL_WaitThread(state.fTermNotificationThread, NULL);
+    SDL_WaitThread(state.fMonitorThread, NULL);
 
-#ifdef SK_BUILD_FOR_WIN
-    WaitForSingleObject(state.fMonitorThread, INFINITE);
-#endif
+    // Destroy vte object
+    if (vte) {
+        tsm_vte_unref(vte);
+    }
+
+    // Destroy Screen Object
+    if (screen) {
+        tsm_screen_unref(screen);
+    }
 
 #if 1
     // Destory glContext
