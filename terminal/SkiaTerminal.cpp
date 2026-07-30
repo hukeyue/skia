@@ -545,7 +545,7 @@ static void handle_sdl_events(ApplicationState* state, SDL_Window* window, SkCan
                         handle_size_change(state, window, canvas, starImage, vte_ctx, screen, vte);
                         break;
                     default:
-                        SkDebugf("sdl: window event 0x%x\n", event.window.event);
+                        SkDebugf("sdl: window event %d\n", event.window.event);
                         break;
                 }
                 break;
@@ -988,9 +988,14 @@ static bool create_conpty(int ws_row, int ws_col, TsmVteCtx *ctx, ApplicationSta
     }
 
     if (pid < 0) {
-        SkDebugf("something wrong with forkpty: %s\n", strerror(errno));
+        errno_t cerrno = errno;
+        SkDebugf("forkpty %s\n",
+                 std::system_category().message(cerrno).c_str());
         return false;
     }
+
+    SkDebugf("forkpty: pid %d\n", pid);
+
     state->fPid = pid;
 
 #if 0
@@ -1010,8 +1015,6 @@ static bool create_conpty(int ws_row, int ws_col, TsmVteCtx *ctx, ApplicationSta
     }
 #endif
 
-    SkDebugf("forkpty: pid %d\n", pid);
-
     return true;
 }
 
@@ -1024,11 +1027,12 @@ static bool resize_conpty(int ws_row, int ws_col, TsmVteCtx *ctx, ApplicationSta
     ws.ws_col = ws_row;
 
     if (ioctl(fd, TIOCSWINSZ, &ws) < 0) {
-        SkDebugf("resize_conpty: TIOCSWINSZ %s", strerror(errno));
+        errno_t cerrno = errno;
+        SkDebugf("ioctl: TIOCSWINSZ %s\n",
+                 std::system_category().message(cerrno).c_str());
         return false;
     }
 
-    SkDebugf("TIOCSWINSZ: row %d col %d\n", ws_row, ws_col);
     return true;
 }
 
@@ -1167,7 +1171,7 @@ static void term_write_cb(struct tsm_vte* vte, const char* u8, size_t len, void*
       }
     } while(false);
     if (send_len < 0) {
-        int cerrno = errno;
+        errno_t cerrno = errno;
         if (cerrno != EAGAIN && cerrno != EWOULDBLOCK) {
             SkDebugf("term_write_cb: send %s\n",
                      std::system_category().message(cerrno).c_str());
@@ -1194,7 +1198,7 @@ static long term_read_cb(struct tsm_vte* vte, char* u8, size_t len, bool *is_eof
         SkDebugf("term_read_cb: read EOF\n");
         *is_eof = true;
     } else if (ret < 0) {
-        long cerrno = errno;
+        errno_t cerrno = errno;
         if (cerrno != EAGAIN && cerrno != EWOULDBLOCK) {
             SkDebugf("term_read_cb: read %s\n",
                      std::system_category().message(cerrno).c_str());
@@ -1987,7 +1991,7 @@ int main(int argc, char** argv) {
             SkDebugf("waitpid: pid %d exited code %d\n", pid, ret);
         } else {
             errno_t cerrno = errno;
-            SkDebugf("waitpid: pid %d %s\n",
+            SkDebugf("waitpid: pid %d %s\n", pid,
                      std::system_category().message(cerrno).c_str());
         }
 #endif
@@ -2066,8 +2070,9 @@ int main(int argc, char** argv) {
             FD_SET(fd, &rfds);
             int ret = ::select(maxfd + 1, &rfds, NULL, NULL, NULL);
             if (ret == -1) {
+                errno_t cerrno = errno;
                 SkDebugf("select: %s\n",
-                         std::system_category().message(errno).c_str());
+                         std::system_category().message(cerrno).c_str());
                 result = -1;
                 break;
             } else if (ret == 0) {
@@ -2086,15 +2091,16 @@ int main(int argc, char** argv) {
             SDL_PushEvent(&user_event);
 
             SDL_Delay(10.0f + 2);
-        };
+        }
 #else
         int fd = reinterpret_cast<TsmVteCtx*>(data)->fd;
         while (!state->fQuit) {  // Our I/O loop
             int bytes;
             int ret = ioctl(fd, FIONREAD, &bytes);
             if (ret == -1) {
-                SkDebugf("ioctl: %s\n",
-                         std::system_category().message(errno).c_str());
+                errno_t cerrno = errno
+                SkDebugf("ioctl: FIONREAD %s\n",
+                         std::system_category().message(cerrno).c_str());
                 result = -1;
                 break;
             } else if (bytes == 0) {
