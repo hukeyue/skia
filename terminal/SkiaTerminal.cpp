@@ -378,6 +378,9 @@ static void handle_size_change(ApplicationState* state, SDL_Window* window, SkCa
 static long term_read_cb(struct tsm_vte* vte, char* u8, size_t len, bool *is_eof,
                          bool *should_retry, TsmVteCtx *vte_ctx);
 
+#define REFRESH_EVENT     (SDL_USEREVENT + 0)
+#define TTY_INPUT_EVENT   (SDL_USEREVENT + 1)
+
 static void handle_sdl_events(ApplicationState* state, SDL_Window* window, SkCanvas** canvas, sk_sp<SkImage>* starImage,
                               int* rotation, TsmVteCtx* vte_ctx, struct tsm_screen* screen, struct tsm_vte* vte) {
     SDL_Event event;
@@ -550,21 +553,24 @@ static void handle_sdl_events(ApplicationState* state, SDL_Window* window, SkCan
             case SDL_QUIT:
                 state->fQuit = true;
                 return;
-            case SDL_USEREVENT:
+            case REFRESH_EVENT:
 #if 0
                 SkDebugf("term_redraw queued\n");
 #endif
+                SkASSERT(event.user.code == 1);
                 state->fRedrawQueued = true;
                 ++*rotation;
                 break;
-            case SDL_USEREVENT + 1: {
+            case TTY_INPUT_EVENT: {
 #if 0
                 SkDebugf("io_event queued\n");
 #endif
                 long ret = -1;
                 char buf[DEFAULT_PIPE_BUFFER];
                 bool is_eof = false, should_retry = false;
-                Sint32 len = std::min<Sint32>(event.user.code, sizeof(buf));
+                Uint32 bytes = static_cast<Uint32>(reinterpret_cast<uintptr_t>(event.user.data1));
+                Uint32 len = std::min<Uint32>(bytes, sizeof(buf));
+                SkASSERT(event.user.code == 1);
                 ret = term_read_cb(vte, buf, len, &is_eof, &should_retry, vte_ctx);
                 if (ret > 0) {
 #if 0
@@ -1712,14 +1718,14 @@ static int tnthread_routine(void *data) {
         SDL_Event user_event;
         SDL_zero(user_event); // Initialize the event structure
         user_event.type = SDL_USEREVENT + 1; // Custom event type
-        user_event.user.code = dwBytesRead; // Custom code
-        user_event.user.data1 = NULL;
-        user_event.user.data2 = NULL;
+        user_event.user.code = 1; // Custom code
+        user_event.user.data1 = reinterpret_cast<void*>(static_cast<UINT_PTR>(dwBytesRead));
+        user_event.user.data2 = reinterpret_cast<void*>(static_cast<UINT_PTR>(DEFAULT_PIPE_BUFFER));
 
         SDL_PushEvent(&user_event);
 
         SDL_Delay(10.0f + 2);
-    };
+    }
 #else
 #if 1
     int fd = reinterpret_cast<TsmVteCtx*>(data)->fd;
@@ -1744,9 +1750,9 @@ static int tnthread_routine(void *data) {
         SDL_Event user_event;
         SDL_zero(user_event); // Initialize the event structure
         user_event.type = SDL_USEREVENT + 1; // Custom event type
-        user_event.user.code = DEFAULT_PIPE_BUFFER; // Custom code
-        user_event.user.data1 = NULL;
-        user_event.user.data2 = NULL;
+        user_event.user.code = 1; // Custom code
+        user_event.user.data1 = reinterpret_cast<void*>(static_cast<uintptr_t>(DEFAULT_PIPE_BUFFER));
+        user_event.user.data2 = reinterpret_cast<void*>(static_cast<uintptr_t>(DEFAULT_PIPE_BUFFER));
 
         SDL_PushEvent(&user_event);
 
@@ -1771,14 +1777,14 @@ static int tnthread_routine(void *data) {
         SDL_Event user_event;
         SDL_zero(user_event); // Initialize the event structure
         user_event.type = SDL_USEREVENT + 1; // Custom event type
-        user_event.user.code = bytes; // Custom code
-        user_event.user.data1 = NULL;
-        user_event.user.data2 = NULL;
+        user_event.user.code = 1; // Custom code
+        user_event.user.data1 = reinterpret_cast<void*>(static_cast<uintptr_t>(bytes));
+        user_event.user.data2 = reinterpret_cast<void*>(static_cast<uintptr_t>(DEFAULT_PIPE_BUFFER));
 
         SDL_PushEvent(&user_event);
 
         SDL_Delay(10.0f + 2);
-    };
+    }
 #endif
 #endif
     SkDebugf("term-notification thread exited\n");
