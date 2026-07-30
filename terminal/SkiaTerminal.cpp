@@ -171,6 +171,7 @@ struct ApplicationState {
 
 struct TsmVteCtx {
     ApplicationState *state;
+    struct tsm_vte *vte;
 #if defined(SK_BUILD_FOR_WIN)
     HANDLE outPipeOurSide, inPipeOurSide;
 #else
@@ -375,7 +376,7 @@ static void handle_size_change(ApplicationState* state, SDL_Window* window, SkCa
     state->fRedrawRequired = true;
 }
 
-static long term_read_cb(char* u8, size_t len, bool *is_eof,
+static long term_read_cb(struct tsm_vte* vte, char* u8, size_t len, bool *is_eof,
                          bool *should_retry, TsmVteCtx *vte_ctx);
 
 #define REFRESH_EVENT     (SDL_USEREVENT + 0)
@@ -1121,7 +1122,7 @@ static void term_write_cb(struct tsm_vte* vte, const char* u8, size_t len, void*
         state->fQuit = true;
     }
 }
-static long term_read_cb(char* u8, size_t len, bool *is_eof,
+static long term_read_cb(struct tsm_vte* vte, char* u8, size_t len, bool *is_eof,
                          bool *should_retry, TsmVteCtx *vte_ctx) {
     HANDLE outPipeOurSide = vte_ctx->outPipeOurSide;
     DWORD dwBytesRead{};
@@ -1178,7 +1179,7 @@ static void term_write_cb(struct tsm_vte* vte, const char* u8, size_t len, void*
     }
 }
 
-static long term_read_cb(char* u8, size_t len, bool *is_eof,
+static long term_read_cb(struct tsm_vte *vte, char* u8, size_t len, bool *is_eof,
                          bool *should_retry, TsmVteCtx *vte_ctx) {
     int fd = vte_ctx->fd;
     long ret;
@@ -1718,7 +1719,7 @@ static int tnthread_routine(void *data) {
             state->fQuit = true;
             break;
         }
-        ret = term_read_cb(buf, len, &is_eof, &should_retry, vte_ctx);
+        ret = term_read_cb(vte_ctx->vte, buf, len, &is_eof, &should_retry, vte_ctx);
         if (should_retry) {
             continue;
         }
@@ -1768,7 +1769,7 @@ static int tnthread_routine(void *data) {
             state->fQuit = true;
             break;
         }
-        ret = term_read_cb(buf, len, &is_eof, &should_retry, vte_ctx);
+        ret = term_read_cb(vte_ctx->vte, buf, len, &is_eof, &should_retry, vte_ctx);
         if (should_retry) {
             continue;
         }
@@ -1813,7 +1814,7 @@ static int tnthread_routine(void *data) {
             state->fQuit = true;
             break;
         }
-        ret = term_read_cb(buf, len, &is_eof, &should_retry, vte_ctx);
+        ret = term_read_cb(vte_ctx->vte, buf, len, &is_eof, &should_retry, vte_ctx);
         if (should_retry) {
             continue;
         }
@@ -2127,9 +2128,9 @@ int main(int argc, char** argv) {
     sk_sp<SkImage> starImage = draw_star_image(canvas, DEFAULT_STAR_RADIUS);
 
 #ifdef SK_BUILD_FOR_WIN
-    TsmVteCtx vte_ctx { &state, INVALID_HANDLE_VALUE, INVALID_HANDLE_VALUE };
+    TsmVteCtx vte_ctx { &state, NULL, INVALID_HANDLE_VALUE, INVALID_HANDLE_VALUE };
 #else
-    TsmVteCtx vte_ctx { &state, -1 };
+    TsmVteCtx vte_ctx { &state, NULL, -1 };
 #endif
 
     int ws_row = std::floorf((float)(state.fDm.w) / state.fFontAdvanceWidth);
@@ -2163,6 +2164,7 @@ int main(int argc, char** argv) {
     tsm_screen_resize(screen, ws_row, ws_col);
 
     tsm_vte_new(&vte, screen, term_write_cb, &vte_ctx, log_tsm, screen);
+    vte_ctx.vte = vte;
     vte_color_palette_set_type(t_vte_color_palette_solarized_white);
 
     int rotation = 0;
