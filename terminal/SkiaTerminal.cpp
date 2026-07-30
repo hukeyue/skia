@@ -375,7 +375,7 @@ static void handle_size_change(ApplicationState* state, SDL_Window* window, SkCa
     state->fRedrawRequired = true;
 }
 
-static long term_read_cb(struct tsm_vte* vte, char* u8, size_t len, bool *is_eof,
+static long term_read_cb(char* u8, size_t len, bool *is_eof,
                          bool *should_retry, TsmVteCtx *vte_ctx);
 
 #define REFRESH_EVENT     (SDL_USEREVENT + 0)
@@ -565,26 +565,17 @@ static void handle_sdl_events(ApplicationState* state, SDL_Window* window, SkCan
 #if 0
                 SkDebugf("io_event queued\n");
 #endif
-                long ret = -1;
-                char buf[DEFAULT_PIPE_BUFFER];
-                bool is_eof = false, should_retry = false;
-                Uint32 bytes = static_cast<Uint32>(reinterpret_cast<uintptr_t>(event.user.data1));
-                Uint32 len = std::min<Uint32>(bytes, sizeof(buf));
+                char* buf = reinterpret_cast<char*>(event.user.data1);
+                Uint32 ret = static_cast<Sint32>(reinterpret_cast<uintptr_t>(event.user.data2));
                 SkASSERT(event.user.code == 1);
-                ret = term_read_cb(vte, buf, len, &is_eof, &should_retry, vte_ctx);
-                if (ret > 0) {
+                SkASSERT(ret > 0);
 #if 0
-                    SkDebugf("term_read_cb: %ld\n", ret);
+                SkDebugf("term_read_cb: %d\n", ret);
 #endif
-                    tsm_vte_input(vte, buf, ret);
-                    SkDebugf("term_redraw required\n");
-                    state->fRedrawRequired = true;
-                } else if (should_retry) {
-                    state->fShouldRetry = true;
-                } else if (ret < 0 || is_eof) {
-                    state->fQuit = true;
-                    return;
-                }
+                tsm_vte_input(vte, buf, ret);
+                delete []buf;
+                SkDebugf("term_redraw required\n");
+                state->fRedrawRequired = true;
                 break;
             }
             default:
@@ -1130,7 +1121,7 @@ static void term_write_cb(struct tsm_vte* vte, const char* u8, size_t len, void*
         state->fQuit = true;
     }
 }
-static long term_read_cb(struct tsm_vte* vte, char* u8, size_t len, bool *is_eof,
+static long term_read_cb(char* u8, size_t len, bool *is_eof,
                          bool *should_retry, TsmVteCtx *vte_ctx) {
     HANDLE outPipeOurSide = vte_ctx->outPipeOurSide;
     DWORD dwBytesRead{};
@@ -1187,7 +1178,7 @@ static void term_write_cb(struct tsm_vte* vte, const char* u8, size_t len, void*
     }
 }
 
-static long term_read_cb(struct tsm_vte* vte, char* u8, size_t len, bool *is_eof,
+static long term_read_cb(char* u8, size_t len, bool *is_eof,
                          bool *should_retry, TsmVteCtx *vte_ctx) {
     int fd = vte_ctx->fd;
     long ret;
@@ -1695,6 +1686,7 @@ static int rnthread_routine(void *data) {
 }
 
 static int tnthread_routine(void *data) {
+    auto vte_ctx = reinterpret_cast<TsmVteCtx*>(data);
     auto state = reinterpret_cast<TsmVteCtx*>(data)->state;
     int result = 0;
     SkDebugf("term-notification thread began\n");
@@ -1709,22 +1701,41 @@ static int tnthread_routine(void *data) {
             SkDebugf("PeekNamedPipe: %s\n",
                      std::system_category().message(hr).c_str());
             result = -1;
+            state->fQuit = true;
             break;
         } else if (dwBytesRead == 0) {
             SDL_Delay(10.0f + 2);
             continue;
         }
 
+        Sint32 ret;
+        char *buf = new char[dwBytesRead];
+        bool is_eof = false, should_retry = false;
+        Uint32 len = dwBytesRead;
+        if (!buf) {
+            SkDebugf("OOM\n");
+            result = -1;
+            state->fQuit = true;
+            break;
+        }
+        ret = term_read_cb(buf, len, &is_eof, &should_retry, vte_ctx);
+        if (should_retry) {
+            continue;
+        }
+        if (is_eof || ret < 0) {
+            result = -1;
+            state->fQuit = true;
+            break;
+        }
+
         SDL_Event user_event;
         SDL_zero(user_event); // Initialize the event structure
-        user_event.type = SDL_USEREVENT + 1; // Custom event type
+        user_event.type = TTY_INPUT_EVENT; // Custom event type
         user_event.user.code = 1; // Custom code
-        user_event.user.data1 = reinterpret_cast<void*>(static_cast<UINT_PTR>(dwBytesRead));
-        user_event.user.data2 = reinterpret_cast<void*>(static_cast<UINT_PTR>(DEFAULT_PIPE_BUFFER));
+        user_event.user.data1 = buf;
+        user_event.user.data2 = reinterpret_cast<void*>(static_cast<UINT_PTR>(ret));
 
         SDL_PushEvent(&user_event);
-
-        SDL_Delay(10.0f + 2);
     }
 #else
 #if 1
@@ -1740,6 +1751,7 @@ static int tnthread_routine(void *data) {
             SkDebugf("select: %s\n",
                      std::system_category().message(cerrno).c_str());
             result = -1;
+            state->fQuit = true;
             break;
         } else if (ret == 0) {
             SDL_Delay(10.0f + 2);
@@ -1747,16 +1759,33 @@ static int tnthread_routine(void *data) {
         }
         SkASSERT(FD_ISSET(fd, &rfds));
 
+        char *buf = new char[DEFAULT_PIPE_BUFFER];
+        bool is_eof = false, should_retry = false;
+        Uint32 len = DEFAULT_PIPE_BUFFER;
+        if (!buf) {
+            SkDebugf("OOM\n");
+            result = -1;
+            state->fQuit = true;
+            break;
+        }
+        ret = term_read_cb(buf, len, &is_eof, &should_retry, vte_ctx);
+        if (should_retry) {
+            continue;
+        }
+        if (is_eof || ret < 0) {
+            result = -1;
+            state->fQuit = true;
+            break;
+        }
+
         SDL_Event user_event;
         SDL_zero(user_event); // Initialize the event structure
-        user_event.type = SDL_USEREVENT + 1; // Custom event type
+        user_event.type = TTY_INPUT_EVENT; // Custom event type
         user_event.user.code = 1; // Custom code
-        user_event.user.data1 = reinterpret_cast<void*>(static_cast<uintptr_t>(DEFAULT_PIPE_BUFFER));
-        user_event.user.data2 = reinterpret_cast<void*>(static_cast<uintptr_t>(DEFAULT_PIPE_BUFFER));
+        user_event.user.data1 = buf;
+        user_event.user.data2 = reinterpret_cast<void*>(static_cast<uintptr_t>(ret));
 
         SDL_PushEvent(&user_event);
-
-        SDL_Delay(10.0f + 2);
     }
 #else
     int fd = reinterpret_cast<TsmVteCtx*>(data)->fd;
@@ -1764,26 +1793,44 @@ static int tnthread_routine(void *data) {
         int bytes;
         int ret = ioctl(fd, FIONREAD, &bytes);
         if (ret == -1) {
-            errno_t cerrno = errno
+            errno_t cerrno = errno;
             SkDebugf("ioctl: FIONREAD %s\n",
                      std::system_category().message(cerrno).c_str());
             result = -1;
+            state->fQuit = true;
             break;
         } else if (bytes == 0) {
             SDL_Delay(10.0f + 2);
             continue;
         }
 
+        char *buf = new char[DEFAULT_PIPE_BUFFER];
+        bool is_eof = false, should_retry = false;
+        Uint32 len = DEFAULT_PIPE_BUFFER;
+        if (!buf) {
+            SkDebugf("OOM\n");
+            result = -1;
+            state->fQuit = true;
+            break;
+        }
+        ret = term_read_cb(buf, len, &is_eof, &should_retry, vte_ctx);
+        if (should_retry) {
+            continue;
+        }
+        if (is_eof || ret < 0) {
+            result = -1;
+            state->fQuit = true;
+            break;
+        }
+
         SDL_Event user_event;
         SDL_zero(user_event); // Initialize the event structure
-        user_event.type = SDL_USEREVENT + 1; // Custom event type
+        user_event.type = TTY_INPUT_EVENT; // Custom event type
         user_event.user.code = 1; // Custom code
-        user_event.user.data1 = reinterpret_cast<void*>(static_cast<uintptr_t>(bytes));
-        user_event.user.data2 = reinterpret_cast<void*>(static_cast<uintptr_t>(DEFAULT_PIPE_BUFFER));
+        user_event.user.data1 = buf;
+        user_event.user.data2 = reinterpret_cast<void*>(static_cast<uintptr_t>(ret));
 
         SDL_PushEvent(&user_event);
-
-        SDL_Delay(10.0f + 2);
     }
 #endif
 #endif
