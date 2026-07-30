@@ -918,9 +918,15 @@ static void close_conpty(TsmVteCtx */*ctx*/, ApplicationState *state) {
     // Clean-up the pipes
     ::CloseHandle(listen_ctx->inPipeOurSide);
     ::CloseHandle(listen_ctx->outPipeOurSide);
+    // Terminate process if still runnning
+    ::TerminateProcess(listen_ctx->hProcess, /*uExitCode*/ ~0u);
+}
+
+static void fini_conpty(ApplicationState *state) {
+    sk_sp<WinListenContext> listen_ctx = state->fListenCtx;
+
     // Now safe to clean-up client app's process-info & thread
     ::CloseHandle(listen_ctx->hThread);
-    ::TerminateProcess(listen_ctx->hProcess, /*uExitCode*/ 0);
     ::CloseHandle(listen_ctx->hProcess);
 }
 #else
@@ -1033,13 +1039,36 @@ static void close_conpty(TsmVteCtx *ctx, ApplicationState *state) {
 
     // Clean-up the pipes
     ret = close(fd);
-    if (ret != 0) {
-        SkDebugf("conpty: close pipe %d failed\n", fd);
+    if (ret < 0) {
+        errno_t cerrno = errno;
+        SkDebugf("conpty: close on fd %d %s\n", fd,
+                 std::system_category().message(cerrno).c_str());
     }
 
+    // Terminate process if still runnning
+    int wstatus;
+    ret = waitpid(pid, &wstatus, WNOHANG);
+    if (ret < 0) {
+        errno_t cerrno = errno;
+        SkDebugf("conpty: waitpid %d %s\n", pid,
+                 std::system_category().message(cerrno).c_str());
+    } else if (ret == 0) {
+        // subprocess is not yet to exit
+        ret = kill(pid, SIGKILL);
+        if (ret < 0) {
+            errno_t cerrno = errno;
+            SkDebugf("conpty: kill on SIGKILL on %d %s\n", pid,
+                     std::system_category().message(cerrno).c_str());
+        }
+    } else /* ret > 0 */ {
+       ret = WEXITSTATUS(wstatus);
+       SkDebugf("conpty: pid %d exited code %d\n", pid, ret);
+    }
+}
+
+static void fini_conpty(ApplicationState *state) {
     // Now safe to clean-up client app's process-info & thread
-    ret = kill(pid, SIGKILL);
-    static_cast<void>(ret); // better right way is to check with WNOHANG first, we don't bother it.
+    static_cast<void>(state);
 }
 #endif
 
@@ -2149,6 +2178,8 @@ redraw_queued:
     SDL_WaitThread(state.fRedrawNotificationThread, NULL);
     SDL_WaitThread(state.fTermNotificationThread, NULL);
     SDL_WaitThread(state.fMonitorThread, NULL);
+
+    fini_conpty(&state);
 
     // Destroy vte object
     if (vte) {
