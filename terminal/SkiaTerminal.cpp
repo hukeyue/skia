@@ -923,6 +923,8 @@ static void fini_conpty(ApplicationState *state) {
     // Now safe to clean-up client app's process-info & thread
     ::CloseHandle(listen_ctx->hThread);
     ::CloseHandle(listen_ctx->hProcess);
+
+    state->fListenCtx.reset();
 }
 #else
 // MakeNativeInterface
