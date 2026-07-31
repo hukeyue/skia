@@ -365,6 +365,10 @@ static void handle_size_change(ApplicationState *state, SDL_Window *window, TsmV
     SDL_GL_GetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, &contextType);
 
     SkCanvas *canvas = glGetCanvas(dw, dh, windowFormat, contextType, state->fWidthScale, state->fHeightScale);
+    if (!canvas) {
+        SkDebugf("FATAL: gl state unavailable\n");
+        return;
+    }
     canvas->clear(term_get_default_bc());
 
     state->fFontAdvanceWidth = gFont->measureText("X", 1U, SkTextEncoding::kUTF8, nullptr);
@@ -1728,14 +1732,14 @@ static int rnthread_routine(void *data) {
     while (!state->fQuit) {  // Our VSync loop
         SDL_Event user_event;
         SDL_zero(user_event); // Initialize the event structure
-        user_event.type = SDL_USEREVENT; // Custom event type
+        user_event.type = REFRESH_EVENT; // Custom event type
         user_event.user.code = 1; // Custom code
         user_event.user.data1 = NULL;
         user_event.user.data2 = NULL;
 
         SDL_PushEvent(&user_event);
 
-        SDL_Delay(1000.0f / state->fDm.refresh_rate);
+        SDL_Delay(1000.0f / state->fDm.refresh_rate * 5.0);
     }
     SkDebugf("redraw-notification thread exited\n");
     return 0;
@@ -2180,6 +2184,7 @@ int main(int argc, char** argv) {
 
     SkCanvas *canvas = glGetCanvas(dw, dh, windowFormat, contextType, state.fWidthScale, state.fHeightScale);
     if (!canvas) {
+        SkDebugf("FATAL: gl state unavailable\n");
         return -1;
     }
 
