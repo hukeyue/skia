@@ -176,9 +176,12 @@ struct TsmVteCtx {
 
 
 struct GLState {
-  sk_sp<const GrGLInterface> glInterface;
-  sk_sp<GrDirectContext> grContext;
-  sk_sp<SkSurface> surface;
+    sk_sp<const GrGLInterface> glInterface;
+    sk_sp<GrDirectContext> grContext;
+    sk_sp<SkSurface> surface;
+
+    SkCanvas *canvas; // binded to surface
+    sk_sp<SkImage> starImage;
 };
 
 static void handle_sdl_error() {
@@ -189,6 +192,8 @@ static void handle_sdl_error() {
 
 static SkFont *gFont, *gFontBold;
 static GLState *glState;
+
+static sk_sp<SkImage> draw_star_image(SkCanvas *canvas, float r);
 
 static SkCanvas* glGetCanvas(int dw, int dh, uint32_t windowFormat, int contextType,
                              double widthScale, double heightScale) {
@@ -289,13 +294,22 @@ static SkCanvas* glGetCanvas(int dw, int dh, uint32_t windowFormat, int contextT
         return nullptr;
     }
     canvas->scale(widthScale, heightScale);
+
+    glState->canvas = canvas;
+    glState->starImage = draw_star_image(canvas, DEFAULT_STAR_RADIUS);
+    if (!glState->starImage) {
+        SkDebugf("draw_star_image Error\n");
+        glState->canvas = nullptr;
+        glState->surface.reset();
+        glState->grContext.reset();
+        glState->glInterface.reset();
+        return nullptr;
+    }
     return canvas;
 }
 
-static sk_sp<SkImage> draw_star_image(SkCanvas *canvas, float r);
-
-static void handle_size_change(ApplicationState* state, SDL_Window* window, SkCanvas** canvas, sk_sp<SkImage>* starImage,
-                               TsmVteCtx* vte_ctx, struct tsm_screen* screen, struct tsm_vte* vte) {
+static void handle_size_change(ApplicationState *state, SDL_Window *window, TsmVteCtx *vte_ctx) {
+    struct tsm_screen *screen = vte_ctx->screen;
 
     int dw, dh;
 
@@ -350,9 +364,8 @@ static void handle_size_change(ApplicationState* state, SDL_Window* window, SkCa
     int contextType;
     SDL_GL_GetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, &contextType);
 
-    *canvas = glGetCanvas(dw, dh, windowFormat, contextType, state->fWidthScale, state->fHeightScale);
-    *starImage = draw_star_image(*canvas, DEFAULT_STAR_RADIUS);
-    (*canvas)->clear(term_get_default_bc());
+    SkCanvas *canvas = glGetCanvas(dw, dh, windowFormat, contextType, state->fWidthScale, state->fHeightScale);
+    canvas->clear(term_get_default_bc());
 
     state->fFontAdvanceWidth = gFont->measureText("X", 1U, SkTextEncoding::kUTF8, nullptr);
     state->fFontSpacing = std::min(1.0f, gFont->getSpacing());
@@ -385,9 +398,11 @@ static long term_read_cb(struct tsm_vte* vte, char* u8, size_t len, bool *is_eof
 #define REFRESH_EVENT     (SDL_USEREVENT + 0)
 #define TTY_INPUT_EVENT   (SDL_USEREVENT + 1)
 
-static void handle_sdl_events(ApplicationState* state, SDL_Window* window, SkCanvas** canvas, sk_sp<SkImage>* starImage,
-                              int* rotation, TsmVteCtx* vte_ctx, struct tsm_screen* screen, struct tsm_vte* vte) {
+static void handle_sdl_events(ApplicationState *state, SDL_Window *window, int *rotation, TsmVteCtx *vte_ctx) {
     SDL_Event event;
+
+    struct tsm_screen *screen = vte_ctx->screen;
+    struct tsm_vte *vte = vte_ctx->vte;
     while (SDL_PollEvent(&event)) {
         switch (event.type) {
             case SDL_MOUSEMOTION:
@@ -425,13 +440,13 @@ static void handle_sdl_events(ApplicationState* state, SDL_Window* window, SkCan
                         state->fFontSize += 1.0 / state->fWidthScale;
                         gFont->setSize(state->fFontSize);
                         gFontBold->setSize(state->fFontSize);
-                        handle_size_change(state, window, canvas, starImage, vte_ctx, screen, vte);
+                        handle_size_change(state, window, vte_ctx);
                         return;
                     } else if (key == SDLK_MINUS && (state->fFontSize - 1.0f) / state->fWidthScale >= 8.0) {
                         state->fFontSize -= 1.0 / state->fWidthScale;
                         gFont->setSize(state->fFontSize);
                         gFontBold->setSize(state->fFontSize);
-                        handle_size_change(state, window, canvas, starImage, vte_ctx, screen, vte);
+                        handle_size_change(state, window, vte_ctx);
                         return;
                     }
                 }
@@ -546,7 +561,7 @@ static void handle_sdl_events(ApplicationState* state, SDL_Window* window, SkCan
                 switch (event.window.event) {
                     case SDL_WINDOWEVENT_RESIZED:
                         // Use SDL_GL_GetDrawableSize to measure the layout change
-                        handle_size_change(state, window, canvas, starImage, vte_ctx, screen, vte);
+                        handle_size_change(state, window, vte_ctx);
                         break;
                     default:
                         SkDebugf("sdl: window event %d\n", event.window.event);
@@ -1357,13 +1372,13 @@ static VTE_COLOR_palette_t VTE_COLOR_palette_solarized_white = {
 
 static VTE_COLOR_palette_t *VTE_COLOR_palette_in_runtime = &VTE_COLOR_palette;
 
-enum vte_color_palette_t {
+enum tsm_vte_color_palette_t {
   t_vte_color_palette = 0x0,
   t_vte_color_palette_solarized,
   t_vte_color_palette_solarized_black,
   t_vte_color_palette_solarized_white,
 };
-static void vte_color_palette_set_type(vte_color_palette_t t) {
+static void tsm_vte_color_palette_set_type(tsm_vte_color_palette_t t) {
   switch(t) {
     default:
     case t_vte_color_palette:
@@ -1538,7 +1553,7 @@ static sk_sp<SkImage> draw_star_image(SkCanvas *canvas, float r) {
 
     SkCanvas* offscreen = cpuSurface->getCanvas();
     offscreen->save();
-    paint.setColor(SkColorSetARGB(0xff, 7, 54, 66));
+    paint.setColor(term_get_default_bc());
     offscreen->translate(r, r);
     offscreen->drawPath(create_star(r), paint);
     offscreen->restore();
@@ -2168,9 +2183,7 @@ int main(int argc, char** argv) {
         return -1;
     }
 
-    sk_sp<SkImage> starImage = draw_star_image(canvas, DEFAULT_STAR_RADIUS);
-
-    TsmVteCtx vte_ctx { &state, NULL, NULL, {} };
+    TsmVteCtx tsm_vte_ctx { &state, NULL, NULL, {} };
 
     int ws_row = std::floorf((float)(state.fDm.w) / state.fFontAdvanceWidth);
     int ws_col = std::floorf((float)(state.fDm.h - state.fFontSpacing) / (state.fFontSize + state.fFontSpacing));
@@ -2182,11 +2195,11 @@ int main(int argc, char** argv) {
 #endif
 
     SkDebugf("init: row %d col %d\n", ws_row, ws_col);
-    if (!init_conpty(&vte_ctx, &state)) {
+    if (!init_conpty(&tsm_vte_ctx, &state)) {
         SkDebugf("init: failed to initialize conpty\n");
         return -1;
     }
-    if (!create_conpty(ws_row, ws_col, &vte_ctx, &state)) {
+    if (!create_conpty(ws_row, ws_col, &tsm_vte_ctx, &state)) {
         SkDebugf("init: failed to create conpty\n");
         return -1;
     }
@@ -2194,35 +2207,36 @@ int main(int argc, char** argv) {
     state.fCol = ws_col;
 
     // create a software-based virtual terminal
-    struct tsm_screen *screen = NULL;
-    struct tsm_vte *vte = NULL;
-
-    tsm_screen_new(&screen, log_tsm, screen);
-    vte_ctx.screen = screen;
+    if (tsm_screen_new(&tsm_vte_ctx.screen, log_tsm, NULL) != 0) {
+        SkDebugf("tsm_screen_new failed\n");
+        return -1;
+    }
     // increases scrollback size to 500k lines
-    tsm_screen_set_max_sb(screen, 500000);
-    tsm_screen_resize(screen, ws_row, ws_col);
+    tsm_screen_set_max_sb(tsm_vte_ctx.screen, 500000);
+    tsm_screen_resize(tsm_vte_ctx.screen, ws_row, ws_col);
 
-    tsm_vte_new(&vte, screen, term_write_cb, &vte_ctx, log_tsm, screen);
-    vte_ctx.vte = vte;
-    vte_color_palette_set_type(t_vte_color_palette_solarized_white);
+    if (tsm_vte_new(&tsm_vte_ctx.vte, tsm_vte_ctx.screen, term_write_cb, &tsm_vte_ctx, log_tsm, NULL) != 0) {
+        SkDebugf("tsm_vte_new failed\n");
+        return -1;
+    }
+    tsm_vte_color_palette_set_type(t_vte_color_palette_solarized_white);
 
     int rotation = 0;
     SDL_Thread *monitor_thread, *redraw_notify_thread, *term_notify_thread;
 
-    monitor_thread = SDL_CreateThread(mthread_routine, "monitor thread", &vte_ctx);
+    monitor_thread = SDL_CreateThread(mthread_routine, "monitor thread", &tsm_vte_ctx);
     if (!monitor_thread) {
         handle_sdl_error();
         return 1;
     }
 
-    redraw_notify_thread = SDL_CreateThread(rnthread_routine, "redraw-notification thread", &vte_ctx);
+    redraw_notify_thread = SDL_CreateThread(rnthread_routine, "redraw-notification thread", &tsm_vte_ctx);
     if (!redraw_notify_thread) {
         handle_sdl_error();
         return 1;
     }
 
-    term_notify_thread = SDL_CreateThread(tnthread_routine, "term-notification thread", &vte_ctx);
+    term_notify_thread = SDL_CreateThread(tnthread_routine, "term-notification thread", &tsm_vte_ctx);
     if (!term_notify_thread) {
         handle_sdl_error();
         return 1;
@@ -2233,7 +2247,7 @@ int main(int argc, char** argv) {
         state.fShouldRetry = false;
 
         canvas->clear(term_get_default_bc());
-        handle_sdl_events(&state, window, &canvas, &starImage, &rotation, &vte_ctx, screen, vte);
+        handle_sdl_events(&state, window, &rotation, &tsm_vte_ctx);
         if (state.fQuit) {
             break;
         }
@@ -2259,17 +2273,18 @@ should_retry:
 
 redraw_queued:
         state.fRedrawQueued = false;
+        canvas = glState->canvas;
 
         // pass 1: draw terminal canvas
         canvas->save();
-        draw_vte_screen(canvas, &state, vte, screen);
+        draw_vte_screen(canvas, &state, tsm_vte_ctx.vte, tsm_vte_ctx.screen);
         canvas->restore();
 
         // pass 2: draw star canvas from offline canvas
         canvas->save();
         canvas->translate(state.fDm.w / 2.0 , state.fDm.h / 2.0);
         canvas->rotate(rotation);
-        canvas->drawImage(starImage, -DEFAULT_STAR_RADIUS, -DEFAULT_STAR_RADIUS);
+        canvas->drawImage(glState->starImage, -DEFAULT_STAR_RADIUS, -DEFAULT_STAR_RADIUS);
         canvas->restore();
 
         auto dContext = GrAsDirectContext(canvas->recordingContext());
@@ -2278,13 +2293,13 @@ redraw_queued:
         SDL_GL_SwapWindow(window);
     }
 
-    close_conpty(&vte_ctx, &state);
+    close_conpty(&tsm_vte_ctx, &state);
 
     SDL_WaitThread(redraw_notify_thread, NULL);
     SDL_WaitThread(term_notify_thread, NULL);
     SDL_WaitThread(monitor_thread, NULL);
 
-    fini_conpty(&vte_ctx, &state);
+    fini_conpty(&tsm_vte_ctx, &state);
 
 #if 1
     // Destory glContext
