@@ -215,6 +215,14 @@ static SkCanvas* glGetCanvas(int dw, int dh, uint32_t windowFormat, int contextT
     SkDebugf("SkCurrent GL Render: %s\n", glState->glInterface->fFunctions.fGetString(GR_GL_RENDERER));
     SkDebugf("SkCurrent GL Version: %s\n", glState->glInterface->fFunctions.fGetString(GR_GL_VERSION));
 #endif
+#ifdef SK_ANGLE
+    GrGLDriverInfo driverInfo = GrGLGetDriverInfo(glState->glInterface.get());
+    if (driverInfo.fANGLEBackend == GrGLANGLEBackend::kD3D11) {
+        SkDebugf("SkCurrent ANGLE backend: d3d11\n");
+    } else if (driverInfo.fANGLEBackend == GrGLANGLEBackend::kD3D9) {
+        SkDebugf("SkCurrent ANGLE backend: d3d9\n");
+    }
+#endif
 
     glState->glInterface->fFunctions.fViewport(0, 0, dw, dh);
     glState->glInterface->fFunctions.fClearColor(1, 1, 1, 1);
