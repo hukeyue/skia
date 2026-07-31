@@ -152,32 +152,26 @@ struct ApplicationState {
     int32_t fDh;
 };
 
+struct OsListenContext : public SkRefCnt {
 #if defined(SK_BUILD_FOR_WIN)
-struct WinListenContext : public SkRefCnt {
-    PFNCREATEPSEUDOCONSOLE fCreatePseudoConsole;
-    PFNRESIZEPSEUDOCONSOLE fResizePseudoConsole;
-    PFNCLOSEPSEUDOCONSOLE fClosePseudoConsole;
+    PFNCREATEPSEUDOCONSOLE fCreatePseudoConsole = &CreatePseudoConsole;
+    PFNRESIZEPSEUDOCONSOLE fResizePseudoConsole = &ResizePseudoConsole;
+    PFNCLOSEPSEUDOCONSOLE fClosePseudoConsole = &ClosePseudoConsole;
 
-    HANDLE outPipeOurSide, inPipeOurSide;
-    HANDLE hPC;
-    HANDLE hThread, hProcess;
-};
+    HANDLE outPipeOurSide = INVALID_HANDLE_VALUE, inPipeOurSide = INVALID_HANDLE_VALUE;
+    HPCON hPC = 0;
+    HANDLE hThread = INVALID_HANDLE_VALUE, hProcess = INVALID_HANDLE_VALUE;
+#else
+    pid_t pid = -1;
+    int fd = -1;
 #endif
+};
 
 struct TsmVteCtx {
     ApplicationState *state;
     struct tsm_screen *screen;
     struct tsm_vte *vte;
-#if defined(SK_BUILD_FOR_WIN)
-    sk_sp<WinListenContext> listen_ctx;
-#else
-    pid_t pid;
-#endif
-#if defined(SK_BUILD_FOR_WIN)
-    HANDLE outPipeOurSide, inPipeOurSide;
-#else
-    int fd;
-#endif
+    sk_sp<OsListenContext> listen_ctx;
 };
 
 
@@ -689,7 +683,7 @@ HRESULT ReadFileN(HANDLE hFile, LPVOID lpBuffer, DWORD nNumberOfBytesToRead, LPD
 
 // conpty: MakeNativeInterface
 static bool init_conpty(TsmVteCtx *vte_ctx, ApplicationState *state) {
-    sk_sp<WinListenContext> listen_ctx = sk_make_sp<WinListenContext>();
+    sk_sp<OsListenContext> listen_ctx = sk_make_sp<OsListenContext>();
     HMODULE hLibrary = EnsureKernel32Loaded();
     const PFNCREATEPSEUDOCONSOLE fCreatePseudoConsole = (PFNCREATEPSEUDOCONSOLE)GetProcAddress(hLibrary, "CreatePseudoConsole");
     if (fCreatePseudoConsole == nullptr) {
@@ -719,10 +713,10 @@ static BOOL SKCreateNamedPipe(HANDLE *readSide, HANDLE *writeSide, DWORD process
     //
     //
     BOOL fSuccess;
-    OVERLAPPED ov;
     HANDLE handleArray[1];
     HANDLE hPipeServer, hPipeClient;
     HRESULT hr = S_OK;
+    OVERLAPPED ov;
     int lastError;
 
     char buffer[64];
@@ -800,12 +794,12 @@ static BOOL SKCreateNamedPipe(HANDLE *readSide, HANDLE *writeSide, DWORD process
 // conpty: MakeSurface
 static bool create_conpty(int ws_row, int ws_col, TsmVteCtx *vte_ctx, ApplicationState *state) {
     BOOL fSuccess;
-    HRESULT hr = S_OK;
+    COORD consize;
     HANDLE outPipeOurSide, inPipeOurSide;
     HANDLE outPipePseudoConsoleSide, inPipePseudoConsoleSide;
     HPCON hPC = 0;
-    COORD consize;
-    sk_sp<WinListenContext> listen_ctx = vte_ctx->listen_ctx;
+    HRESULT hr = S_OK;
+    sk_sp<OsListenContext> listen_ctx = vte_ctx->listen_ctx;
     STARTUPINFOEXW startupInfoEx {};
     wchar_t expanded_commandline[MAX_PATH];
     const wchar_t *commandline = L"%WINDIR%\\system32\\cmd.exe";
@@ -878,8 +872,6 @@ static bool create_conpty(int ws_row, int ws_col, TsmVteCtx *vte_ctx, Applicatio
     listen_ctx->hPC = hPC;
     listen_ctx->hThread = process_information.hThread;
     listen_ctx->hProcess = process_information.hProcess;
-    vte_ctx->outPipeOurSide = outPipeOurSide;
-    vte_ctx->inPipeOurSide = inPipeOurSide;
 
     SkDebugf("CreateProcessW: process %lu\n", process_information.dwProcessId);
 
@@ -892,7 +884,7 @@ cleanup:
 }
 
 static bool resize_conpty(int ws_row, int ws_col, TsmVteCtx *vte_ctx, ApplicationState *state) {
-    sk_sp<WinListenContext> listen_ctx = vte_ctx->listen_ctx;
+    sk_sp<OsListenContext> listen_ctx = vte_ctx->listen_ctx;
     COORD consize;
     HRESULT hr = S_OK;
 
@@ -913,7 +905,7 @@ static bool resize_conpty(int ws_row, int ws_col, TsmVteCtx *vte_ctx, Applicatio
 }
 
 static void close_conpty(TsmVteCtx *vte_ctx, ApplicationState *state) {
-    sk_sp<WinListenContext> listen_ctx = vte_ctx->listen_ctx;
+    sk_sp<OsListenContext> listen_ctx = vte_ctx->listen_ctx;
 
     // Close ConPTY - this will terminate client process if running
     listen_ctx->fClosePseudoConsole(listen_ctx->hPC);
@@ -926,7 +918,7 @@ static void close_conpty(TsmVteCtx *vte_ctx, ApplicationState *state) {
 }
 
 static void fini_conpty(TsmVteCtx *vte_ctx, ApplicationState *state) {
-    sk_sp<WinListenContext> listen_ctx = vte_ctx->listen_ctx;
+    sk_sp<OsListenContext> listen_ctx = vte_ctx->listen_ctx;
 
     // Now safe to clean-up client app's process-info & thread
     ::CloseHandle(listen_ctx->hThread);
@@ -947,13 +939,17 @@ static void fini_conpty(TsmVteCtx *vte_ctx, ApplicationState *state) {
 #else
 // MakeNativeInterface
 static bool init_conpty(TsmVteCtx *vte_ctx, ApplicationState *state) {
+    sk_sp<OsListenContext> listen_ctx = sk_make_sp<OsListenContext>();
+    vte_ctx->listen_ctx = listen_ctx;
     return true;
 }
 
 static bool create_conpty(int ws_row, int ws_col, TsmVteCtx *vte_ctx, ApplicationState *state) {
-    int *fd = &vte_ctx->fd;
+    int fd;
     struct termios term;
     struct winsize ws;
+    sk_sp<OsListenContext> listen_ctx = vte_ctx->listen_ctx;
+
     memset(&term, 0, sizeof(term));
     memset(&ws, 0, sizeof(ws));
 
@@ -994,7 +990,7 @@ static bool create_conpty(int ws_row, int ws_col, TsmVteCtx *vte_ctx, Applicatio
     ws.ws_col = ws_row;
 
     // Using the same way just like Terminal.app
-    pid_t pid = ::forkpty(fd, nullptr, &term, &ws);
+    pid_t pid = ::forkpty(&fd, nullptr, &term, &ws);
     if (pid == 0) {
         ::setenv("TERM", "xterm-256color", 1);
         const char* childArgv[] = {"/bin/bash", "-la", nullptr};
@@ -1011,10 +1007,11 @@ static bool create_conpty(int ws_row, int ws_col, TsmVteCtx *vte_ctx, Applicatio
 
     SkDebugf("forkpty: pid %d\n", pid);
 
-    vte_ctx->pid = pid;
+    listen_ctx->pid = pid;
+    listen_ctx->fd = fd;
 
 #if 0
-    int ret = fcntl(*fd, F_SETFL, O_NONBLOCK | fcntl(*fd, F_GETFL));
+    int ret = fcntl(fd, F_SETFL, O_NONBLOCK | fcntl(*fd, F_GETFL));
     if (ret < 0) {
         errno_t cerrno = errno;
         SkDebugf("fcntl: O_NONBLOCK %s\n",
@@ -1022,7 +1019,7 @@ static bool create_conpty(int ws_row, int ws_col, TsmVteCtx *vte_ctx, Applicatio
     }
 #else
     int arg = 1;
-    int ret = ioctl(*fd, FIONBIO, &arg);
+    int ret = ioctl(fd, FIONBIO, &arg);
     if (ret < 0) {
         errno_t cerrno = errno;
         SkDebugf("ioctl: FIONBIO %s\n",
@@ -1034,7 +1031,8 @@ static bool create_conpty(int ws_row, int ws_col, TsmVteCtx *vte_ctx, Applicatio
 }
 
 static bool resize_conpty(int ws_row, int ws_col, TsmVteCtx *vte_ctx, ApplicationState *state) {
-    int fd = vte_ctx->fd;
+    sk_sp<OsListenContext> listen_ctx = vte_ctx->listen_ctx;
+    int fd = listen_ctx->fd;
     struct winsize ws;
     memset(&ws, 0, sizeof(ws));
 
@@ -1052,8 +1050,9 @@ static bool resize_conpty(int ws_row, int ws_col, TsmVteCtx *vte_ctx, Applicatio
 }
 
 static void close_conpty(TsmVteCtx *vte_ctx, ApplicationState *state) {
-    int fd = vte_ctx->fd;
-    pid_t pid = vte_ctx->pid;
+    sk_sp<OsListenContext> listen_ctx = vte_ctx->listen_ctx;
+    int fd = listen_ctx->fd;
+    pid_t pid = listen_ctx->pid;
     int ret;
 
     // Clean-up the pipes
@@ -1136,8 +1135,10 @@ void log_tsm(void* data, const char* file, int line, const char* fn,
 
 #if defined(SK_BUILD_FOR_WIN)
 static void term_write_cb(struct tsm_vte* vte, const char* u8, size_t len, void* data) {
+    sk_sp<OsListenContext> listen_ctx = reinterpret_cast<TsmVteCtx*>(data)->listen_ctx;
     ApplicationState *state = reinterpret_cast<TsmVteCtx*>(data)->state;
-    HANDLE inPipeOurSide = reinterpret_cast<TsmVteCtx*>(data)->inPipeOurSide;
+
+    HANDLE inPipeOurSide = listen_ctx->inPipeOurSide;
     DWORD dwBytesWritten{};
     HRESULT hr;
 
@@ -1155,7 +1156,9 @@ static void term_write_cb(struct tsm_vte* vte, const char* u8, size_t len, void*
 }
 static long term_read_cb(struct tsm_vte* vte, char* u8, size_t len, bool *is_eof,
                          bool *should_retry, TsmVteCtx *vte_ctx) {
-    HANDLE outPipeOurSide = vte_ctx->outPipeOurSide;
+    sk_sp<OsListenContext> listen_ctx = vte_ctx->listen_ctx;
+
+    HANDLE outPipeOurSide = listen_ctx->outPipeOurSide;
     DWORD dwBytesRead{};
     HRESULT hr;
 
@@ -1187,9 +1190,12 @@ static long term_read_cb(struct tsm_vte* vte, char* u8, size_t len, bool *is_eof
 }
 #else
 static void term_write_cb(struct tsm_vte* vte, const char* u8, size_t len, void* data) {
+    sk_sp<OsListenContext> listen_ctx = reinterpret_cast<TsmVteCtx*>(data)->listen_ctx;
     ApplicationState *state = reinterpret_cast<TsmVteCtx*>(data)->state;
-    int fd = reinterpret_cast<TsmVteCtx*>(data)->fd;
+
+    int fd = listen_ctx->fd;
     int send_len;
+
     do {
       send_len = write(fd, u8, len);
       if (send_len < 0 && errno == EINTR) {
@@ -1212,7 +1218,9 @@ static void term_write_cb(struct tsm_vte* vte, const char* u8, size_t len, void*
 
 static long term_read_cb(struct tsm_vte *vte, char* u8, size_t len, bool *is_eof,
                          bool *should_retry, TsmVteCtx *vte_ctx) {
-    int fd = vte_ctx->fd;
+    sk_sp<OsListenContext> listen_ctx = vte_ctx->listen_ctx;
+
+    int fd = listen_ctx->fd;
     long ret;
     do {
       ret = read(fd, u8, len);
@@ -1650,12 +1658,12 @@ static HRESULT retrieveDPI(SkDPI *dpi, RECT *rect)
 #endif /* SK_BUILD_FOR_WIN */
 
 static int mthread_routine(void *data) {
+    sk_sp<OsListenContext> listen_ctx = reinterpret_cast<TsmVteCtx*>(data)->listen_ctx;
     ApplicationState *state = reinterpret_cast<TsmVteCtx*>(data)->state;
-    TsmVteCtx *vte_ctx = reinterpret_cast<TsmVteCtx*>(data);
     SkDebugf("monitor thread began\n");
 #if defined(SK_BUILD_FOR_WIN)
     HRESULT hr = S_OK;
-    HANDLE hProcess = vte_ctx->listen_ctx->hProcess;
+    HANDLE hProcess = listen_ctx->hProcess;
     DWORD processId = ::GetProcessId(hProcess);
     DWORD exitCode = ~0;
 
@@ -1680,7 +1688,7 @@ static int mthread_routine(void *data) {
         }
     }
 #else
-    pid_t pid = vte_ctx->pid;
+    pid_t pid = listen_ctx->pid;
     int ret;
     int wstatus, exitCode = -1;
     ret = waitpid(pid, &wstatus, 0);
@@ -1700,8 +1708,7 @@ static int mthread_routine(void *data) {
 }
 
 static int rnthread_routine(void *data) {
-    TsmVteCtx *vte_ctx = reinterpret_cast<TsmVteCtx*>(data);
-    ApplicationState *state = vte_ctx->state;
+    ApplicationState *state = reinterpret_cast<TsmVteCtx*>(data)->state;
     SkDebugf("redraw-notification thread began\n");
     while (!state->fQuit) {  // Our VSync loop
         SDL_Event user_event;
@@ -1721,11 +1728,12 @@ static int rnthread_routine(void *data) {
 
 static int tnthread_routine(void *data) {
     TsmVteCtx *vte_ctx = reinterpret_cast<TsmVteCtx*>(data);
+    sk_sp<OsListenContext> listen_ctx = reinterpret_cast<TsmVteCtx*>(data)->listen_ctx;
     ApplicationState *state = vte_ctx->state;
     int result = 0;
     SkDebugf("term-notification thread began\n");
 #if defined(SK_BUILD_FOR_WIN)
-    HANDLE outPipeOurSide = reinterpret_cast<TsmVteCtx*>(data)->outPipeOurSide;
+    HANDLE outPipeOurSide = listen_ctx->outPipeOurSide;
     DWORD dwBytesRead{};
     HRESULT hr;
     while (!state->fQuit) {  // Our I/O loop
@@ -1773,7 +1781,7 @@ static int tnthread_routine(void *data) {
     }
 #else
 #if 1
-    int fd = reinterpret_cast<TsmVteCtx*>(data)->fd;
+    int fd = listen_ctx->fd;
     int maxfd = fd;
     fd_set rfds;
     while (!state->fQuit) {  // Our I/O loop
@@ -1822,7 +1830,7 @@ static int tnthread_routine(void *data) {
         SDL_PushEvent(&user_event);
     }
 #else
-    int fd = reinterpret_cast<TsmVteCtx*>(data)->fd;
+    int fd = listen_ctx->fd;
     while (!state->fQuit) {  // Our I/O loop
         int bytes;
         int ret = ioctl(fd, FIONREAD, &bytes);
@@ -2162,11 +2170,7 @@ int main(int argc, char** argv) {
 
     sk_sp<SkImage> starImage = draw_star_image(canvas, DEFAULT_STAR_RADIUS);
 
-#ifdef SK_BUILD_FOR_WIN
-    TsmVteCtx vte_ctx { &state, NULL, NULL, {}, INVALID_HANDLE_VALUE, INVALID_HANDLE_VALUE };
-#else
-    TsmVteCtx vte_ctx { &state, NULL, NULL, -1, -1 };
-#endif
+    TsmVteCtx vte_ctx { &state, NULL, NULL, {} };
 
     int ws_row = std::floorf((float)(state.fDm.w) / state.fFontAdvanceWidth);
     int ws_col = std::floorf((float)(state.fDm.h - state.fFontSpacing) / (state.fFontSize + state.fFontSpacing));
