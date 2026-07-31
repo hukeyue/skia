@@ -152,7 +152,7 @@ struct ApplicationState {
     int32_t fDh;
 };
 
-#ifdef SK_BUILD_FOR_WIN
+#if defined(SK_BUILD_FOR_WIN)
 struct WinListenContext : public SkRefCnt {
     PFNCREATEPSEUDOCONSOLE fCreatePseudoConsole;
     PFNRESIZEPSEUDOCONSOLE fResizePseudoConsole;
@@ -168,7 +168,7 @@ struct TsmVteCtx {
     ApplicationState *state;
     struct tsm_screen *screen;
     struct tsm_vte *vte;
-#ifdef SK_BUILD_FOR_WIN
+#if defined(SK_BUILD_FOR_WIN)
     sk_sp<WinListenContext> listen_ctx;
 #else
     pid_t pid;
@@ -189,7 +189,7 @@ struct GLState {
 
 static void handle_sdl_error() {
     const char* error = SDL_GetError();
-    SkDebugf("SDL Error: %s\n", error);
+    SkDebugf("SDL Error: %s\n", error); // we use SkDebugf here because SDL might be not initialized
     SDL_ClearError();
 }
 
@@ -215,7 +215,7 @@ static SkCanvas* glGetCanvas(int dw, int dh, uint32_t windowFormat, int contextT
     SkDebugf("SkCurrent GL Render: %s\n", glState->glInterface->fFunctions.fGetString(GR_GL_RENDERER));
     SkDebugf("SkCurrent GL Version: %s\n", glState->glInterface->fFunctions.fGetString(GR_GL_VERSION));
 #endif
-#ifdef SK_ANGLE
+#if defined(SK_BUILD_FOR_WIN) && defined(SK_ANGLE)
     GrGLDriverInfo driverInfo = GrGLGetDriverInfo(glState->glInterface.get());
     if (driverInfo.fANGLEBackend == GrGLANGLEBackend::kD3D11) {
         SkDebugf("SkCurrent ANGLE backend: d3d11\n");
@@ -268,7 +268,7 @@ static SkCanvas* glGetCanvas(int dw, int dh, uint32_t windowFormat, int contextT
     SDL_GL_GetAttribute(SDL_GL_STENCIL_SIZE, &stencilBits);
     SkDebugf("stencilBits %d\n", stencilBits);
 
-    auto target = GrBackendRenderTargets::MakeGL(dw, dh, msaaSampleCount, stencilBits, info);
+    GrBackendRenderTarget target = GrBackendRenderTargets::MakeGL(dw, dh, msaaSampleCount, stencilBits, info);
 
     // setup SkSurface
     // To use distance field text, use commented out SkSurfaceProps instead
@@ -366,7 +366,7 @@ static void handle_size_change(ApplicationState* state, SDL_Window* window, SkCa
     int ws_row = std::floorf((dw / state->fWidthScale) / state->fFontAdvanceWidth);
     int ws_col = std::floorf((dh / state->fHeightScale - state->fFontSpacing) / (state->fFontSize + state->fFontSpacing));
 
-#ifdef SK_BUILD_FOR_WIN
+#if defined(SK_BUILD_FOR_WIN)
     update_window_title(window, "cmd.exe", ws_row, ws_col);
 #else
     update_window_title(window, "bash", ws_row, ws_col);
@@ -691,18 +691,17 @@ HRESULT ReadFileN(HANDLE hFile, LPVOID lpBuffer, DWORD nNumberOfBytesToRead, LPD
 static bool init_conpty(TsmVteCtx *vte_ctx, ApplicationState *state) {
     sk_sp<WinListenContext> listen_ctx = sk_make_sp<WinListenContext>();
     HMODULE hLibrary = EnsureKernel32Loaded();
-    const auto fCreatePseudoConsole = (PFNCREATEPSEUDOCONSOLE)GetProcAddress(hLibrary, "CreatePseudoConsole");
+    const PFNCREATEPSEUDOCONSOLE fCreatePseudoConsole = (PFNCREATEPSEUDOCONSOLE)GetProcAddress(hLibrary, "CreatePseudoConsole");
     if (fCreatePseudoConsole == nullptr) {
         SkDebugf("conpty: CreatePseudoConsole not found\n");
         return false;
     }
-    const auto fResizePseudoConsole = (PFNRESIZEPSEUDOCONSOLE)GetProcAddress(hLibrary, "ResizePseudoConsole");
+    const PFNRESIZEPSEUDOCONSOLE fResizePseudoConsole = (PFNRESIZEPSEUDOCONSOLE)GetProcAddress(hLibrary, "ResizePseudoConsole");
     if (fResizePseudoConsole == nullptr) {
         SkDebugf("conpty: ResizePseudoConsole not found\n");
         return false;
     }
-    // Close ConPTY - this will terminate client process if running
-    const auto fClosePseudoConsole = (PFNCLOSEPSEUDOCONSOLE)GetProcAddress(hLibrary, "ClosePseudoConsole");
+    const PFNCLOSEPSEUDOCONSOLE fClosePseudoConsole = (PFNCLOSEPSEUDOCONSOLE)GetProcAddress(hLibrary, "ClosePseudoConsole");
     if (fClosePseudoConsole == nullptr) {
         SkDebugf("conpty: ClosePseudoConsole not found\n");
         return false;
@@ -1137,7 +1136,7 @@ void log_tsm(void* data, const char* file, int line, const char* fn,
 
 #if defined(SK_BUILD_FOR_WIN)
 static void term_write_cb(struct tsm_vte* vte, const char* u8, size_t len, void* data) {
-    auto state = reinterpret_cast<TsmVteCtx*>(data)->state;
+    ApplicationState *state = reinterpret_cast<TsmVteCtx*>(data)->state;
     HANDLE inPipeOurSide = reinterpret_cast<TsmVteCtx*>(data)->inPipeOurSide;
     DWORD dwBytesWritten{};
     HRESULT hr;
@@ -1188,7 +1187,7 @@ static long term_read_cb(struct tsm_vte* vte, char* u8, size_t len, bool *is_eof
 }
 #else
 static void term_write_cb(struct tsm_vte* vte, const char* u8, size_t len, void* data) {
-    auto state = reinterpret_cast<TsmVteCtx*>(data)->state;
+    ApplicationState *state = reinterpret_cast<TsmVteCtx*>(data)->state;
     int fd = reinterpret_cast<TsmVteCtx*>(data)->fd;
     int send_len;
     do {
@@ -1651,10 +1650,10 @@ static HRESULT retrieveDPI(SkDPI *dpi, RECT *rect)
 #endif /* SK_BUILD_FOR_WIN */
 
 static int mthread_routine(void *data) {
-    auto vte_ctx = reinterpret_cast<TsmVteCtx*>(data);
-    auto state = reinterpret_cast<TsmVteCtx*>(data)->state;
+    ApplicationState *state = reinterpret_cast<TsmVteCtx*>(data)->state;
+    TsmVteCtx *vte_ctx = reinterpret_cast<TsmVteCtx*>(data);
     SkDebugf("monitor thread began\n");
-#ifdef SK_BUILD_FOR_WIN
+#if defined(SK_BUILD_FOR_WIN)
     HRESULT hr = S_OK;
     HANDLE hProcess = vte_ctx->listen_ctx->hProcess;
     DWORD processId = ::GetProcessId(hProcess);
@@ -1701,7 +1700,8 @@ static int mthread_routine(void *data) {
 }
 
 static int rnthread_routine(void *data) {
-    auto state = reinterpret_cast<TsmVteCtx*>(data)->state;
+    TsmVteCtx *vte_ctx = reinterpret_cast<TsmVteCtx*>(data);
+    ApplicationState *state = vte_ctx->state;
     SkDebugf("redraw-notification thread began\n");
     while (!state->fQuit) {  // Our VSync loop
         SDL_Event user_event;
@@ -1720,11 +1720,11 @@ static int rnthread_routine(void *data) {
 }
 
 static int tnthread_routine(void *data) {
-    auto vte_ctx = reinterpret_cast<TsmVteCtx*>(data);
-    auto state = reinterpret_cast<TsmVteCtx*>(data)->state;
+    TsmVteCtx *vte_ctx = reinterpret_cast<TsmVteCtx*>(data);
+    ApplicationState *state = vte_ctx->state;
     int result = 0;
     SkDebugf("term-notification thread began\n");
-#ifdef SK_BUILD_FOR_WIN
+#if defined(SK_BUILD_FOR_WIN)
     HANDLE outPipeOurSide = reinterpret_cast<TsmVteCtx*>(data)->outPipeOurSide;
     DWORD dwBytesRead{};
     HRESULT hr;
@@ -1872,6 +1872,17 @@ static int tnthread_routine(void *data) {
     return result;
 }
 
+static ApplicationState *gState = NULL;
+
+static void signal_handler(int sig) {
+    if (sig == SIGINT) {
+        gState->fQuit = true;
+    }
+    if (sig == SIGTERM) {
+        gState->fQuit = true;
+    }
+};
+
 #if defined(SK_BUILD_FOR_ANDROID) || defined(SK_BUILD_FOR_WIN)
 int SDL_main(int argc, char** argv) {
 #else
@@ -1892,16 +1903,15 @@ int main(int argc, char** argv) {
     // and linking "Shcore.lib" to your project.
     // Note that this call must be the first Window management-related call in your program,
     // so you should probably call this at the very top of your main.
+    HRESULT hr = S_OK;
 #if 1
-    HRESULT hr = ::SetProcessDpiAwareness(PROCESS_PER_MONITOR_DPI_AWARE);
+    hr = ::SetProcessDpiAwareness(PROCESS_PER_MONITOR_DPI_AWARE);
     if (FAILED(hr)) {
         SkDebugf("SetProcessDpiAwareness(): %s\n",
                  std::system_category().message(hr).c_str());
     }
 #else
-    BOOL result = ::SetProcessDPIAware();
-    HRESULT hr = S_OK;
-    if (!result) {
+    if (!::SetProcessDPIAware()) {
         hr = HRESULT_FROM_WIN32(GetLastError());
         SkDebugf("SetProcessDpiAware(): %s\n",
                  std::system_category().message(hr).c_str());
@@ -1919,26 +1929,18 @@ int main(int argc, char** argv) {
     SkDebugf("sdl video driver: %s\n", SDL_GetCurrentVideoDriver());
 
     ApplicationState state {};
-    static ApplicationState *gState = &state;
+    gState = &state;
 
     // embraces interrupt signal
-    auto signal_handler = [](int sig) {
-        if (sig == SIGINT) {
-            gState->fQuit = true;
-        }
-        if (sig == SIGTERM) {
-            gState->fQuit = true;
-        }
-    };
     if (signal(SIGINT, signal_handler) != 0) {
-        SkDebugf("SIGINT handler was not enabled.");
+        SkDebugf("SIGINT handler was not properly enabled.");
     }
     if (signal(SIGTERM, signal_handler) != 0) {
-        SkDebugf("SIGTERM handler was not enabled.");
+        SkDebugf("SIGTERM handler was not properly enabled.");
     }
-#ifndef SK_BUILD_FOR_WIN
+#if !defined(SK_BUILD_FOR_WIN)
     if (signal(SIGPIPE, SIG_IGN) != 0) {
-        SkDebugf("SIGPIPE handler was not disabled properly.");
+        SkDebugf("SIGPIPE handler was not properly disabled.");
     }
 #endif
 
@@ -2081,7 +2083,7 @@ int main(int argc, char** argv) {
 #endif
 
 #if 0
-    auto pfnGlGetString = (decltype(&glGetString))SDL_GL_GetProcAddress("glGetString");
+    decltype(&glGetString) pfnGlGetString = (decltype(&glGetString))SDL_GL_GetProcAddress("glGetString");
     const char* vendorStr = reinterpret_cast<const char*>(pfnGlGetString(GR_GL_VENDOR));
     SkDebugf("Current GL Vendor: %s\n", vendorStr);
     const char* renderStr = reinterpret_cast<const char*>(pfnGlGetString(GR_GL_RENDERER));
@@ -2153,7 +2155,7 @@ int main(int argc, char** argv) {
     GLState _glState;
     glState = &_glState;
 
-    auto canvas = glGetCanvas(dw, dh, windowFormat, contextType, state.fWidthScale, state.fHeightScale);
+    SkCanvas *canvas = glGetCanvas(dw, dh, windowFormat, contextType, state.fWidthScale, state.fHeightScale);
     if (!canvas) {
         return -1;
     }
@@ -2169,7 +2171,7 @@ int main(int argc, char** argv) {
     int ws_row = std::floorf((float)(state.fDm.w) / state.fFontAdvanceWidth);
     int ws_col = std::floorf((float)(state.fDm.h - state.fFontSpacing) / (state.fFontSize + state.fFontSpacing));
 
-#ifdef SK_BUILD_FOR_WIN
+#if defined(SK_BUILD_FOR_WIN)
     update_window_title(window, "cmd.exe", ws_row, ws_col);
 #else
     update_window_title(window, "bash", ws_row, ws_col);
