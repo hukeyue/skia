@@ -132,18 +132,6 @@ static void update_window_title(SDL_Window *window, const char* name, int ws_row
  *   draw more complex primitives (star)
  */
 
-#ifdef SK_BUILD_FOR_WIN
-struct WinListenContext : public SkRefCnt {
-    PFNCREATEPSEUDOCONSOLE fCreatePseudoConsole;
-    PFNRESIZEPSEUDOCONSOLE fResizePseudoConsole;
-    PFNCLOSEPSEUDOCONSOLE fClosePseudoConsole;
-
-    HANDLE outPipeOurSide, inPipeOurSide;
-    HANDLE hPC;
-    HANDLE hThread, hProcess;
-};
-#endif
-
 struct ApplicationState {
     ApplicationState() : fQuit(false), fFontSize(12.0), fFontAdvanceWidth(), fFontSpacing() {}
     // Storage for the user created rectangles. The last one may still be being edited.
@@ -162,16 +150,29 @@ struct ApplicationState {
     int32_t fCol;
     int32_t fDw;
     int32_t fDh;
-#ifdef SK_BUILD_FOR_WIN
-    sk_sp<WinListenContext> fListenCtx;
-#else
-    pid_t fPid;
-#endif
 };
+
+#ifdef SK_BUILD_FOR_WIN
+struct WinListenContext : public SkRefCnt {
+    PFNCREATEPSEUDOCONSOLE fCreatePseudoConsole;
+    PFNRESIZEPSEUDOCONSOLE fResizePseudoConsole;
+    PFNCLOSEPSEUDOCONSOLE fClosePseudoConsole;
+
+    HANDLE outPipeOurSide, inPipeOurSide;
+    HANDLE hPC;
+    HANDLE hThread, hProcess;
+};
+#endif
 
 struct TsmVteCtx {
     ApplicationState *state;
+    struct tsm_screen *screen;
     struct tsm_vte *vte;
+#ifdef SK_BUILD_FOR_WIN
+    sk_sp<WinListenContext> listen_ctx;
+#else
+    pid_t pid;
+#endif
 #if defined(SK_BUILD_FOR_WIN)
     HANDLE outPipeOurSide, inPipeOurSide;
 #else
@@ -679,7 +680,7 @@ HRESULT ReadFileN(HANDLE hFile, LPVOID lpBuffer, DWORD nNumberOfBytesToRead, LPD
 }
 
 // conpty: MakeNativeInterface
-static bool init_conpty(ApplicationState *state) {
+static bool init_conpty(TsmVteCtx *vte_ctx, ApplicationState *state) {
     sk_sp<WinListenContext> listen_ctx = sk_make_sp<WinListenContext>();
     HMODULE hLibrary = EnsureKernel32Loaded();
     const auto fCreatePseudoConsole = (PFNCREATEPSEUDOCONSOLE)GetProcAddress(hLibrary, "CreatePseudoConsole");
@@ -701,7 +702,7 @@ static bool init_conpty(ApplicationState *state) {
     listen_ctx->fCreatePseudoConsole = fCreatePseudoConsole;
     listen_ctx->fResizePseudoConsole = fResizePseudoConsole;
     listen_ctx->fClosePseudoConsole = fClosePseudoConsole;
-    state->fListenCtx = listen_ctx;
+    vte_ctx->listen_ctx = listen_ctx;
     return true;
 }
 
@@ -797,7 +798,7 @@ static bool create_conpty(int ws_row, int ws_col, TsmVteCtx *vte_ctx, Applicatio
     HANDLE outPipePseudoConsoleSide, inPipePseudoConsoleSide;
     HPCON hPC = 0;
     COORD consize;
-    sk_sp<WinListenContext> listen_ctx = state->fListenCtx;
+    sk_sp<WinListenContext> listen_ctx = vte_ctx->listen_ctx;
     STARTUPINFOEXW startupInfoEx {};
     wchar_t expanded_commandline[MAX_PATH];
     const wchar_t *commandline = L"%WINDIR%\\system32\\cmd.exe";
@@ -883,8 +884,8 @@ cleanup:
     return fSuccess;
 }
 
-static bool resize_conpty(int ws_row, int ws_col, TsmVteCtx */*ctx*/, ApplicationState *state) {
-    sk_sp<WinListenContext> listen_ctx = state->fListenCtx;
+static bool resize_conpty(int ws_row, int ws_col, TsmVteCtx *vte_ctx, ApplicationState *state) {
+    sk_sp<WinListenContext> listen_ctx = vte_ctx->listen_ctx;
     COORD consize;
     HRESULT hr = S_OK;
 
@@ -904,8 +905,8 @@ static bool resize_conpty(int ws_row, int ws_col, TsmVteCtx */*ctx*/, Applicatio
     return true;
 }
 
-static void close_conpty(TsmVteCtx */*ctx*/, ApplicationState *state) {
-    sk_sp<WinListenContext> listen_ctx = state->fListenCtx;
+static void close_conpty(TsmVteCtx *vte_ctx, ApplicationState *state) {
+    sk_sp<WinListenContext> listen_ctx = vte_ctx->listen_ctx;
 
     // Close ConPTY - this will terminate client process if running
     listen_ctx->fClosePseudoConsole(listen_ctx->hPC);
@@ -917,23 +918,33 @@ static void close_conpty(TsmVteCtx */*ctx*/, ApplicationState *state) {
     ::TerminateProcess(listen_ctx->hProcess, /*uExitCode*/ ~0u);
 }
 
-static void fini_conpty(ApplicationState *state) {
-    sk_sp<WinListenContext> listen_ctx = state->fListenCtx;
+static void fini_conpty(TsmVteCtx *vte_ctx, ApplicationState *state) {
+    sk_sp<WinListenContext> listen_ctx = vte_ctx->listen_ctx;
 
     // Now safe to clean-up client app's process-info & thread
     ::CloseHandle(listen_ctx->hThread);
     ::CloseHandle(listen_ctx->hProcess);
 
-    state->fListenCtx.reset();
+    vte_ctx->listen_ctx.reset();
+
+    // Destroy vte object
+    if (vte_ctx->vte) {
+        tsm_vte_unref(vte_ctx->vte);
+    }
+
+    // Destroy Screen Object
+    if (vte_ctx->screen) {
+        tsm_screen_unref(vte_ctx->screen);
+    }
 }
 #else
 // MakeNativeInterface
-static bool init_conpty(ApplicationState *state) {
+static bool init_conpty(TsmVteCtx *vte_ctx, ApplicationState *state) {
     return true;
 }
 
-static bool create_conpty(int ws_row, int ws_col, TsmVteCtx *ctx, ApplicationState *state) {
-    int *fd = &ctx->fd;
+static bool create_conpty(int ws_row, int ws_col, TsmVteCtx *vte_ctx, ApplicationState *state) {
+    int *fd = &vte_ctx->fd;
     struct termios term;
     struct winsize ws;
     memset(&term, 0, sizeof(term));
@@ -993,7 +1004,7 @@ static bool create_conpty(int ws_row, int ws_col, TsmVteCtx *ctx, ApplicationSta
 
     SkDebugf("forkpty: pid %d\n", pid);
 
-    state->fPid = pid;
+    vte_ctx->pid = pid;
 
 #if 0
     int ret = fcntl(*fd, F_SETFL, O_NONBLOCK | fcntl(*fd, F_GETFL));
@@ -1015,8 +1026,8 @@ static bool create_conpty(int ws_row, int ws_col, TsmVteCtx *ctx, ApplicationSta
     return true;
 }
 
-static bool resize_conpty(int ws_row, int ws_col, TsmVteCtx *ctx, ApplicationState *state) {
-    int fd = ctx->fd;
+static bool resize_conpty(int ws_row, int ws_col, TsmVteCtx *vte_ctx, ApplicationState *state) {
+    int fd = vte_ctx->fd;
     struct winsize ws;
     memset(&ws, 0, sizeof(ws));
 
@@ -1033,9 +1044,9 @@ static bool resize_conpty(int ws_row, int ws_col, TsmVteCtx *ctx, ApplicationSta
     return true;
 }
 
-static void close_conpty(TsmVteCtx *ctx, ApplicationState *state) {
-    int fd = ctx->fd;
-    pid_t pid = state->fPid;
+static void close_conpty(TsmVteCtx *vte_ctx, ApplicationState *state) {
+    int fd = vte_ctx->fd;
+    pid_t pid = vte_ctx->pid;
     int ret;
 
     // Clean-up the pipes
@@ -1067,9 +1078,20 @@ static void close_conpty(TsmVteCtx *ctx, ApplicationState *state) {
     }
 }
 
-static void fini_conpty(ApplicationState *state) {
+static void fini_conpty(TsmVteCtx *vte_ctx, ApplicationState *state) {
     // Now safe to clean-up client app's process-info & thread
+    static_cast<void>(vte_ctx);
     static_cast<void>(state);
+
+    // Destroy vte object
+    if (vte_ctx->vte) {
+        tsm_vte_unref(vte_ctx->vte);
+    }
+
+    // Destroy Screen Object
+    if (vte_ctx->screen) {
+        tsm_screen_unref(vte_ctx->screen);
+    }
 }
 #endif
 
@@ -1621,11 +1643,12 @@ static HRESULT retrieveDPI(SkDPI *dpi, RECT *rect)
 #endif /* SK_BUILD_FOR_WIN */
 
 static int mthread_routine(void *data) {
+    auto vte_ctx = reinterpret_cast<TsmVteCtx*>(data);
     auto state = reinterpret_cast<TsmVteCtx*>(data)->state;
     SkDebugf("monitor thread began\n");
 #ifdef SK_BUILD_FOR_WIN
     HRESULT hr = S_OK;
-    HANDLE hProcess = state->fListenCtx->hProcess;
+    HANDLE hProcess = vte_ctx->listen_ctx->hProcess;
     DWORD processId = ::GetProcessId(hProcess);
     DWORD exitCode = ~0;
 
@@ -1650,7 +1673,7 @@ static int mthread_routine(void *data) {
         }
     }
 #else
-    pid_t pid = state->fPid;
+    pid_t pid = vte_ctx->pid;
     int ret;
     int wstatus, exitCode = -1;
     ret = waitpid(pid, &wstatus, 0);
@@ -2130,9 +2153,9 @@ int main(int argc, char** argv) {
     sk_sp<SkImage> starImage = draw_star_image(canvas, DEFAULT_STAR_RADIUS);
 
 #ifdef SK_BUILD_FOR_WIN
-    TsmVteCtx vte_ctx { &state, NULL, INVALID_HANDLE_VALUE, INVALID_HANDLE_VALUE };
+    TsmVteCtx vte_ctx { &state, NULL, NULL, {}, INVALID_HANDLE_VALUE, INVALID_HANDLE_VALUE };
 #else
-    TsmVteCtx vte_ctx { &state, NULL, -1 };
+    TsmVteCtx vte_ctx { &state, NULL, NULL, -1, -1 };
 #endif
 
     int ws_row = std::floorf((float)(state.fDm.w) / state.fFontAdvanceWidth);
@@ -2145,7 +2168,7 @@ int main(int argc, char** argv) {
 #endif
 
     SkDebugf("init: row %d col %d\n", ws_row, ws_col);
-    if (!init_conpty(&state)) {
+    if (!init_conpty(&vte_ctx, &state)) {
         SkDebugf("init: failed to initialize conpty\n");
         return -1;
     }
@@ -2157,10 +2180,11 @@ int main(int argc, char** argv) {
     state.fCol = ws_col;
 
     // create a software-based virtual terminal
-    struct tsm_screen* screen = NULL;
-    struct tsm_vte* vte = NULL;
+    struct tsm_screen *screen = NULL;
+    struct tsm_vte *vte = NULL;
 
     tsm_screen_new(&screen, log_tsm, screen);
+    vte_ctx.screen = screen;
     // increases scrollback size to 500k lines
     tsm_screen_set_max_sb(screen, 500000);
     tsm_screen_resize(screen, ws_row, ws_col);
@@ -2246,17 +2270,7 @@ redraw_queued:
     SDL_WaitThread(term_notify_thread, NULL);
     SDL_WaitThread(monitor_thread, NULL);
 
-    fini_conpty(&state);
-
-    // Destroy vte object
-    if (vte) {
-        tsm_vte_unref(vte);
-    }
-
-    // Destroy Screen Object
-    if (screen) {
-        tsm_screen_unref(screen);
-    }
+    fini_conpty(&vte_ctx, &state);
 
 #if 1
     // Destory glContext
