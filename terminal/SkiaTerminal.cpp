@@ -176,6 +176,11 @@ struct TsmVteCtx {
 
 
 struct GrGLState {
+    sk_sp<SkTypeface> typeface;
+    std::unique_ptr<SkFont> font;
+    sk_sp<SkTypeface> typefaceBold;
+    std::unique_ptr<SkFont> fontBold;
+
     // PLACEHOLDER for SDL_GLContext
     // PLACEHOLDER for SDL_Renderer
     // PLACEHOLDER for SDL_Window
@@ -193,8 +198,6 @@ static void handle_sdl_error() {
     SkDebugf("SDL Error: %s\n", error); // we use SkDebugf here because SDL might be not initialized
     SDL_ClearError();
 }
-
-static SkFont *gFont, *gFontBold;
 
 static sk_sp<SkImage> draw_star_image(SkCanvas *canvas, float r);
 
@@ -375,8 +378,8 @@ static void handle_size_change(ApplicationState *state, GrGLState *glState, SDL_
     }
     canvas->clear(term_get_default_bc());
 
-    state->fFontAdvanceWidth = gFont->measureText("X", 1U, SkTextEncoding::kUTF8, nullptr);
-    state->fFontSpacing = std::min(1.0f, gFont->getSpacing());
+    state->fFontAdvanceWidth = glState->font->measureText("X", 1U, SkTextEncoding::kUTF8, nullptr);
+    state->fFontSpacing = std::min(1.0f, glState->font->getSpacing());
 
     int ws_row = std::floorf((dw / state->fWidthScale) / state->fFontAdvanceWidth);
     int ws_col = std::floorf((dh / state->fHeightScale - state->fFontSpacing) / (state->fFontSize + state->fFontSpacing));
@@ -447,14 +450,14 @@ static void handle_sdl_events(ApplicationState *state, GrGLState *glState, SDL_W
                     !(modifier & KMOD_ALT)) {
                     if (key == '=' /*SDLK_PLUS*/ && (state->fFontSize + 1.0f) / state->fWidthScale <= 32.0) {
                         state->fFontSize += 1.0 / state->fWidthScale;
-                        gFont->setSize(state->fFontSize);
-                        gFontBold->setSize(state->fFontSize);
+                        glState->font->setSize(state->fFontSize);
+                        glState->fontBold->setSize(state->fFontSize);
                         handle_size_change(state, glState, window, vte_ctx);
                         return;
                     } else if (key == SDLK_MINUS && (state->fFontSize - 1.0f) / state->fWidthScale >= 8.0) {
                         state->fFontSize -= 1.0 / state->fWidthScale;
-                        gFont->setSize(state->fFontSize);
-                        gFontBold->setSize(state->fFontSize);
+                        glState->font->setSize(state->fFontSize);
+                        glState->fontBold->setSize(state->fFontSize);
                         handle_size_change(state, glState, window, vte_ctx);
                         return;
                     }
@@ -1467,7 +1470,7 @@ static SkColor term_get_default_bc() {
 }
 
 struct draw_ctx {
-    SkCanvas *canvas;
+    GrGLState *glState;
     ApplicationState *state;
     SkPaint *paint;
     bool bcOnly;
@@ -1489,11 +1492,12 @@ static int draw_cb(struct tsm_screen* con,
         ch = chs;
     }
     draw_ctx *ctx = reinterpret_cast<draw_ctx*>(data);
-    SkCanvas* canvas = ctx->canvas;
+    GrGLState *glState = ctx->glState;
+    SkCanvas *canvas = glState->canvas;
     ApplicationState *state = ctx->state;
     SkPaint *paint = ctx->paint;
     bool bcOnly = ctx->bcOnly;
-    const SkFont *font = gFont;
+    const SkFont *font = glState->font.get();
 
     SkString string;
 
@@ -1535,7 +1539,7 @@ static int draw_cb(struct tsm_screen* con,
     }
 
     if (attr->bold) {
-        font = gFontBold;
+        font = glState->fontBold.get();
     }
 
     if (attr->protect) {
@@ -1570,7 +1574,7 @@ static sk_sp<SkImage> draw_star_image(SkCanvas *canvas, float r) {
     return cpuSurface->makeImageSnapshot();
 }
 
-static void draw_vte_screen(SkCanvas *canvas, ApplicationState *state, struct tsm_vte* vte, struct tsm_screen* screen) {
+static void draw_vte_screen(GrGLState *glState, ApplicationState *state, struct tsm_vte* vte, struct tsm_screen* screen) {
     SkPaint paint;
     paint.setAntiAlias(true);
 
@@ -1578,10 +1582,11 @@ static void draw_vte_screen(SkCanvas *canvas, ApplicationState *state, struct ts
     tsm_vte_get_def_attr(vte, &a);
     SkColor bc = term_get_bc_from_attr(&a);
 
+    SkCanvas *canvas = glState->canvas;
     canvas->clear(bc);
     // canvas->clear(SK_ColorTRANSPARENT);
 
-    struct draw_ctx draw_ctx = { canvas, state, &paint, true };
+    struct draw_ctx draw_ctx = { glState, state, &paint, true };
     // draw background
     tsm_screen_draw(screen, draw_cb, &draw_ctx);
 
@@ -2004,18 +2009,17 @@ int main(int argc, char** argv) {
     state.fWidthScale = state.fHeightScale = 1.00;
 #endif
 
-    sk_sp<SkTypeface> typeface = SkTypeface::MakeFromName(DEFAULT_FONT, SkFontStyle::Normal());
-    SkFont font(typeface, state.fFontSize);
-    font.setEdging(SkFont::Edging::kAntiAlias);
-    // font.setHinting(SkFontHinting::kFull);
+    GrGLState glState;
 
-    gFont = &font;
+    glState.typeface = SkTypeface::MakeFromName(DEFAULT_FONT, SkFontStyle::Normal());
+    glState.font = std::make_unique<SkFont>(glState.typeface, state.fFontSize);
+    glState.font->setEdging(SkFont::Edging::kAntiAlias);
+    // glState.font->setHinting(SkFontHinting::kFull);
 
-    sk_sp<SkTypeface> typefaceBold = SkTypeface::MakeFromName(DEFAULT_FONT, SkFontStyle::Bold());
-    SkFont fontBold(typeface, state.fFontSize);
-    fontBold.setEdging(SkFont::Edging::kAntiAlias);
-    // fontBold.setHinting(SkFontHinting::kFull);
-    gFontBold = &fontBold;
+    glState.typefaceBold = SkTypeface::MakeFromName(DEFAULT_FONT, SkFontStyle::Bold());
+    glState.fontBold = std::make_unique<SkFont>(glState.typefaceBold, state.fFontSize);
+    glState.fontBold->setEdging(SkFont::Edging::kAntiAlias);
+    // glState.fontBold->setHinting(SkFontHinting::kFull);
 
     // Setup window
     // This code will create a window with the same resolution as the user's desktop.
@@ -2028,8 +2032,8 @@ int main(int argc, char** argv) {
     SkDebugf("display: width %d height %d\n", dm.w, dm.h);
 
     // SkASSERT(typeface->isFixedPitch());
-    state.fFontAdvanceWidth = gFont->measureText("X", 1U, SkTextEncoding::kUTF8, nullptr);
-    state.fFontSpacing = std::min(1.0f, gFont->getSpacing());
+    state.fFontAdvanceWidth = glState.font->measureText("X", 1U, SkTextEncoding::kUTF8, nullptr);
+    state.fFontSpacing = std::min(1.0f, glState.font->getSpacing());
 
     SkDebugf("default: cell width %f col %f\n", state.fFontAdvanceWidth, state.fFontSize + state.fFontSpacing);
     SkDebugf("default: row %d col %d\n", DEFAULT_ROW, DEFAULT_COL);
@@ -2184,8 +2188,6 @@ int main(int argc, char** argv) {
     state.fHeightScale = (double)dh / state.fDm.h;
     SkDebugf("scale: width: %.02f, height: %.02f\n", state.fWidthScale, state.fHeightScale);
 
-    GrGLState glState;
-
     SkCanvas *canvas = glGetCanvas(dw, dh, windowFormat, contextType, state.fWidthScale, state.fHeightScale, &glState);
     if (!canvas) {
         SkDebugf("FATAL: gl state unavailable\n");
@@ -2286,7 +2288,7 @@ redraw_queued:
 
         // pass 1: draw terminal canvas
         canvas->save();
-        draw_vte_screen(canvas, &state, tsm_vte_ctx.vte, tsm_vte_ctx.screen);
+        draw_vte_screen(&glState, &state, tsm_vte_ctx.vte, tsm_vte_ctx.screen);
         canvas->restore();
 
         // pass 2: draw star canvas from offline canvas
