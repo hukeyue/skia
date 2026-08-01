@@ -103,6 +103,14 @@ extern char **environ;
 
 #define DEFAULT_PIPE_BUFFER 4096
 
+/*
+ * This demo is a not-too-simple application of what to do with Skia it handles:
+ *   how to draw 16-bit colored text including background
+ *   how to adjust internal memory layout according to window resize callback from Os' side
+ *   work out software-emulated virtual terminal (vte) in real world (at least the editor used to create this software)
+ *   work out creation and destroy of Os' window (likely hiDPI) and OpenGL context (likely software-emulated)
+ *   work out font anti-alias in real world (especially for non-emoji cases)
+ */
 #ifdef SK_BUILD_FOR_WIN
 typedef std::pair<int, int> SkDPI;
 static HRESULT retrieveDPI(SkDPI *dpi, RECT *rect = nullptr);
