@@ -116,7 +116,7 @@ struct TsmVteCtx;
 
 static bool resize_conpty(int ws_row, int ws_col, TsmVteCtx *ctx, ApplicationState *state);
 
-static void update_window_title(SDL_Window *window, const char* name, int ws_row, int ws_col) {
+static void update_window_title(const char* name, int ws_row, int ws_col, SDL_Window *window) {
     char buffer[64];
     int len = snprintf(buffer, sizeof(buffer), "SkTerminal - %s - %dx%d", name, ws_row, ws_col);
     char* stop = buffer + len;
@@ -382,9 +382,9 @@ static void handle_size_change(ApplicationState *state, GrGLState *glState, SDL_
     int ws_col = std::floorf((dh / state->fHeightScale - state->fFontSpacing) / (state->fFontSize + state->fFontSpacing));
 
 #if defined(SK_BUILD_FOR_WIN)
-    update_window_title(window, "cmd.exe", ws_row, ws_col);
+    update_window_title("cmd.exe", ws_row, ws_col, window);
 #else
-    update_window_title(window, "bash", ws_row, ws_col);
+    update_window_title("bash", ws_row, ws_col, window);
 #endif
 
     SkDebugf("resize: cell width %f col %f\n", state->fFontAdvanceWidth, state->fFontSize + state->fFontSpacing);
@@ -395,7 +395,10 @@ static void handle_size_change(ApplicationState *state, GrGLState *glState, SDL_
         SkDebugf("resize_conpty: failed to resize conpty\n");
         return;
     }
-    tsm_screen_resize(screen, ws_row, ws_col);
+    if (tsm_screen_resize(screen, ws_row, ws_col) != 0) {
+        SkDebugf("resize_conpty: failed to resize libtsm\n");
+        return;
+    }
     SkDebugf("term_redraw required\n");
     state->fRedrawRequired = true;
 }
@@ -2199,9 +2202,9 @@ int main(int argc, char** argv) {
     int ws_col = std::floorf((float)(state.fDm.h - state.fFontSpacing) / (state.fFontSize + state.fFontSpacing));
 
 #if defined(SK_BUILD_FOR_WIN)
-    update_window_title(window, "cmd.exe", ws_row, ws_col);
+    update_window_title("cmd.exe", ws_row, ws_col, window);
 #else
-    update_window_title(window, "bash", ws_row, ws_col);
+    update_window_title("bash", ws_row, ws_col, window);
 #endif
 
     SkDebugf("init: row %d col %d\n", ws_row, ws_col);
@@ -2223,7 +2226,10 @@ int main(int argc, char** argv) {
     }
     // increases scrollback size to 500k lines
     tsm_screen_set_max_sb(tsm_vte_ctx.screen, 500000);
-    tsm_screen_resize(tsm_vte_ctx.screen, ws_row, ws_col);
+    if (tsm_screen_resize(tsm_vte_ctx.screen, ws_row, ws_col) != 0) {
+        SkDebugf("tsm_screen_resize failed\n");
+        return -1;
+    }
 
     if (tsm_vte_new(&tsm_vte_ctx.vte, tsm_vte_ctx.screen, term_write_cb, &tsm_vte_ctx, log_tsm, NULL) != 0) {
         SkDebugf("tsm_vte_new failed\n");
