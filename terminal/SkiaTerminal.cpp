@@ -175,7 +175,11 @@ struct TsmVteCtx {
 };
 
 
-struct GLState {
+struct GrGLState {
+    // PLACEHOLDER for SDL_GLContext
+    // PLACEHOLDER for SDL_Renderer
+    // PLACEHOLDER for SDL_Window
+
     sk_sp<const GrGLInterface> glInterface;
     sk_sp<GrDirectContext> grContext;
     sk_sp<SkSurface> surface;
@@ -191,12 +195,11 @@ static void handle_sdl_error() {
 }
 
 static SkFont *gFont, *gFontBold;
-static GLState *glState;
 
 static sk_sp<SkImage> draw_star_image(SkCanvas *canvas, float r);
 
 static SkCanvas* glGetCanvas(int dw, int dh, uint32_t windowFormat, int contextType,
-                             double widthScale, double heightScale) {
+                             double widthScale, double heightScale, GrGLState *glState) {
 #if defined(SK_BUILD_FOR_WIN) && defined(SK_ANGLE)
     // setup GrContext
     glState->glInterface = GrGLMakeEGLInterface();
@@ -308,7 +311,7 @@ static SkCanvas* glGetCanvas(int dw, int dh, uint32_t windowFormat, int contextT
     return canvas;
 }
 
-static void handle_size_change(ApplicationState *state, SDL_Window *window, TsmVteCtx *vte_ctx) {
+static void handle_size_change(ApplicationState *state, GrGLState *glState, SDL_Window *window, TsmVteCtx *vte_ctx) {
     struct tsm_screen *screen = vte_ctx->screen;
 
     int dw, dh;
@@ -364,7 +367,8 @@ static void handle_size_change(ApplicationState *state, SDL_Window *window, TsmV
     int contextType;
     SDL_GL_GetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, &contextType);
 
-    SkCanvas *canvas = glGetCanvas(dw, dh, windowFormat, contextType, state->fWidthScale, state->fHeightScale);
+    SkCanvas *canvas = glGetCanvas(dw, dh, windowFormat, contextType,
+                                   state->fWidthScale, state->fHeightScale, glState);
     if (!canvas) {
         SkDebugf("FATAL: gl state unavailable\n");
         return;
@@ -402,7 +406,8 @@ static long term_read_cb(struct tsm_vte* vte, char* u8, size_t len, bool *is_eof
 #define REFRESH_EVENT     (SDL_USEREVENT + 0)
 #define TTY_INPUT_EVENT   (SDL_USEREVENT + 1)
 
-static void handle_sdl_events(ApplicationState *state, SDL_Window *window, int *rotation, TsmVteCtx *vte_ctx) {
+static void handle_sdl_events(ApplicationState *state, GrGLState *glState, SDL_Window *window, int *rotation,
+                              TsmVteCtx *vte_ctx) {
     SDL_Event event;
 
     struct tsm_screen *screen = vte_ctx->screen;
@@ -444,13 +449,13 @@ static void handle_sdl_events(ApplicationState *state, SDL_Window *window, int *
                         state->fFontSize += 1.0 / state->fWidthScale;
                         gFont->setSize(state->fFontSize);
                         gFontBold->setSize(state->fFontSize);
-                        handle_size_change(state, window, vte_ctx);
+                        handle_size_change(state, glState, window, vte_ctx);
                         return;
                     } else if (key == SDLK_MINUS && (state->fFontSize - 1.0f) / state->fWidthScale >= 8.0) {
                         state->fFontSize -= 1.0 / state->fWidthScale;
                         gFont->setSize(state->fFontSize);
                         gFontBold->setSize(state->fFontSize);
-                        handle_size_change(state, window, vte_ctx);
+                        handle_size_change(state, glState, window, vte_ctx);
                         return;
                     }
                 }
@@ -565,7 +570,7 @@ static void handle_sdl_events(ApplicationState *state, SDL_Window *window, int *
                 switch (event.window.event) {
                     case SDL_WINDOWEVENT_RESIZED:
                         // Use SDL_GL_GetDrawableSize to measure the layout change
-                        handle_size_change(state, window, vte_ctx);
+                        handle_size_change(state, glState, window, vte_ctx);
                         break;
                     default:
                         SkDebugf("sdl: window event %d\n", event.window.event);
@@ -2179,10 +2184,9 @@ int main(int argc, char** argv) {
     state.fHeightScale = (double)dh / state.fDm.h;
     SkDebugf("scale: width: %.02f, height: %.02f\n", state.fWidthScale, state.fHeightScale);
 
-    GLState _glState;
-    glState = &_glState;
+    GrGLState glState;
 
-    SkCanvas *canvas = glGetCanvas(dw, dh, windowFormat, contextType, state.fWidthScale, state.fHeightScale);
+    SkCanvas *canvas = glGetCanvas(dw, dh, windowFormat, contextType, state.fWidthScale, state.fHeightScale, &glState);
     if (!canvas) {
         SkDebugf("FATAL: gl state unavailable\n");
         return -1;
@@ -2252,7 +2256,7 @@ int main(int argc, char** argv) {
         state.fShouldRetry = false;
 
         canvas->clear(term_get_default_bc());
-        handle_sdl_events(&state, window, &rotation, &tsm_vte_ctx);
+        handle_sdl_events(&state, &glState, window, &rotation, &tsm_vte_ctx);
         if (state.fQuit) {
             break;
         }
@@ -2278,7 +2282,7 @@ should_retry:
 
 redraw_queued:
         state.fRedrawQueued = false;
-        canvas = glState->canvas;
+        canvas = glState.canvas;
 
         // pass 1: draw terminal canvas
         canvas->save();
@@ -2289,7 +2293,7 @@ redraw_queued:
         canvas->save();
         canvas->translate(state.fDm.w / 2.0 , state.fDm.h / 2.0);
         canvas->rotate(rotation);
-        canvas->drawImage(glState->starImage, -DEFAULT_STAR_RADIUS, -DEFAULT_STAR_RADIUS);
+        canvas->drawImage(glState.starImage, -DEFAULT_STAR_RADIUS, -DEFAULT_STAR_RADIUS);
         canvas->restore();
 
         auto dContext = GrAsDirectContext(canvas->recordingContext());
@@ -2326,12 +2330,11 @@ redraw_queued:
     // Quit SDL subsystems
     SDL_Quit();
 
-    // Cleanup glState At last
-    if (glState) {
-        glState->surface.reset();
-        glState->grContext.reset();
-        glState->glInterface.reset();
-    }
+    // Cleanup GrGLState At last
+    glState.starImage.reset();
+    glState.surface.reset();
+    glState.grContext.reset();
+    glState.glInterface.reset();
 
     SkDebugf("main thread exited\n");
 
