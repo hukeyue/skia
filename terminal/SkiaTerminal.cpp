@@ -197,8 +197,10 @@ static void handle_sdl_error() {
 
 static sk_sp<SkImage> draw_star_image(SkCanvas *canvas, float r);
 
-static SkCanvas* glGetCanvas(int dw, int dh, uint32_t windowFormat, int contextType,
-                             double widthScale, double heightScale, GrGLState *glState) {
+static SkCanvas* GrGLGetCanvas(ApplicationState *state, uint32_t windowFormat, int contextType, GrGLState *glState) {
+    int dw = state->fDw, dh = state->fDh;
+    double widthScale = state->fWidthScale, heightScale = state->fHeightScale;
+
 #if defined(SK_BUILD_FOR_WIN) && defined(SK_ANGLE)
     // setup GrContext
     glState->glInterface = GrGLMakeEGLInterface();
@@ -366,8 +368,7 @@ static void handle_size_change(ApplicationState *state, GrGLState *glState, SDL_
     int contextType;
     SDL_GL_GetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, &contextType);
 
-    SkCanvas *canvas = glGetCanvas(dw, dh, windowFormat, contextType,
-                                   state->fWidthScale, state->fHeightScale, glState);
+    SkCanvas *canvas = GrGLGetCanvas(state, windowFormat, contextType, glState);
     if (!canvas) {
         SkDebugf("FATAL: gl state unavailable\n");
         return;
@@ -2186,7 +2187,7 @@ int main(int argc, char** argv) {
     state.fHeightScale = (double)dh / state.fDm.h;
     SkDebugf("scale: width: %.02f, height: %.02f\n", state.fWidthScale, state.fHeightScale);
 
-    SkCanvas *canvas = glGetCanvas(dw, dh, windowFormat, contextType, state.fWidthScale, state.fHeightScale, &glState);
+    SkCanvas *canvas = GrGLGetCanvas(&state, windowFormat, contextType, &glState);
     if (!canvas) {
         SkDebugf("FATAL: gl state unavailable\n");
         return -1;
