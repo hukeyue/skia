@@ -181,10 +181,6 @@ struct GrGLState {
     sk_sp<SkTypeface> typefaceBold;
     std::unique_ptr<SkFont> fontBold;
 
-    // PLACEHOLDER for SDL_GLContext
-    // PLACEHOLDER for SDL_Renderer
-    // PLACEHOLDER for SDL_Window
-
     sk_sp<const GrGLInterface> glInterface;
     sk_sp<GrDirectContext> grContext;
     sk_sp<SkSurface> surface;
@@ -1595,15 +1591,6 @@ static void draw_vte_screen(GrGLState *glState, ApplicationState *state, struct 
     tsm_screen_draw(screen, draw_cb, &draw_ctx);
 }
 
-
-/* Used by atexit handler */
-#if 1
-static SDL_GLContext glContext = nullptr;
-#else
-static SDL_Renderer* renderer = nullptr;
-#endif
-static SDL_Window* window = nullptr;
-
 #ifdef SK_BUILD_FOR_WIN
 typedef std::pair<int, int> SkDPI;
 static SkDPI retrieveMonitorDPI(HMONITOR hMonitor)
@@ -1920,6 +1907,10 @@ static void signal_handler(int sig) {
     }
 };
 
+static void exit_handler() {
+    gState->fQuit = true;
+}
+
 #if defined(SK_BUILD_FOR_ANDROID) || defined(SK_BUILD_FOR_WIN)
 int SDL_main(int argc, char** argv) {
 #else
@@ -1982,7 +1973,7 @@ int main(int argc, char** argv) {
 #endif
 
     // embraces exit call in other place
-    std::atexit([]() { gState->fQuit = true; });
+    std::atexit(exit_handler);
 
 #if defined(SK_BUILD_FOR_WIN) && defined(SK_ANGLE)
 #if 0
@@ -2081,6 +2072,9 @@ int main(int argc, char** argv) {
 
     int posx = (dm.w - state.fDm.w) / 2.0f;
     int posy = (dm.h - state.fDm.h) / 2.0f;
+
+    SDL_Window* window = nullptr;
+
     window = SDL_CreateWindow("SkTerminal", posx, posy, state.fDm.w, state.fDm.h, windowFlags);
 
     if (!window) {
@@ -2097,6 +2091,8 @@ int main(int argc, char** argv) {
 #endif
 
 #if 1
+    SDL_GLContext glContext = nullptr;
+
     glContext = SDL_GL_CreateContext(window);
     if (!glContext) {
         handle_sdl_error();
@@ -2107,6 +2103,8 @@ int main(int argc, char** argv) {
         return 1;
     }
 #else
+    SDL_Renderer* renderer = nullptr;
+
     // try and setup a GL context
     renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
     if (!renderer) {
@@ -2337,6 +2335,11 @@ redraw_queued:
     glState.surface.reset();
     glState.grContext.reset();
     glState.glInterface.reset();
+
+    glState.font.reset();
+    glState.typeface.reset();
+    glState.fontBold.reset();
+    glState.typefaceBold.reset();
 
     SkDebugf("main thread exited\n");
 
