@@ -203,7 +203,15 @@ static void handle_sdl_error() {
     SDL_ClearError();
 }
 
-static sk_sp<SkImage> draw_star_image(SkCanvas *canvas, float r);
+/*
+ * draw_star_image
+ *
+ *   draw star image under given radius (float) without interfere the GrGLState
+ *
+ *   \param glState the pointer of given GrGLState object to draw star image
+ *   \param r       the radius of the star image
+ */
+static sk_sp<SkImage> draw_star_image(GrGLState *glState, float r);
 
 static SkCanvas* GrGLGetCanvas(ApplicationState *state, uint32_t windowFormat, int contextType, GrGLState *glState) {
     int dw = state->fDw, dh = state->fDh;
@@ -308,7 +316,7 @@ static SkCanvas* GrGLGetCanvas(ApplicationState *state, uint32_t windowFormat, i
     canvas->scale(widthScale, heightScale);
 
     glState->canvas = canvas;
-    glState->starImage = draw_star_image(canvas, DEFAULT_STAR_RADIUS);
+    glState->starImage = draw_star_image(glState, DEFAULT_STAR_RADIUS);
     if (!glState->starImage) {
         SkDebugf("draw_star_image Error\n");
         glState->canvas = nullptr;
@@ -1565,7 +1573,8 @@ static int draw_cb(struct tsm_screen* con,
     return 0;
 }
 
-static sk_sp<SkImage> draw_star_image(SkCanvas *canvas, float r) {
+static sk_sp<SkImage> draw_star_image(GrGLState *glState, float r) {
+    SkCanvas *canvas = glState->canvas;
     SkPaint paint;
     paint.setAntiAlias(true);
 
@@ -1582,7 +1591,17 @@ static sk_sp<SkImage> draw_star_image(SkCanvas *canvas, float r) {
     return cpuSurface->makeImageSnapshot();
 }
 
-static void draw_vte_screen(GrGLState *glState, ApplicationState *state, struct tsm_vte* vte, struct tsm_screen* screen) {
+/*
+ * draw_vte_screen
+ *
+ *   draw vte screen directly on given GrGLState's canvas using existing application state
+ *
+ *   \param glState the pointer of given GrGLState object to draw vte screen on
+ *   \param state   the pointer of ApplicationState object to describe internal details about vte screen
+ *   \param vte     the pointer of virtual terminal emulator object
+ *   \param screen  the pointer of screen object associated with vte
+ */
+static void draw_vte_screen(GrGLState *glState, ApplicationState *state, struct tsm_vte *vte, struct tsm_screen *screen) {
     SkPaint paint;
     paint.setAntiAlias(true);
 
