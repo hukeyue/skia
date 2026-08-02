@@ -20,6 +20,7 @@
 #include "include/gpu/gl/GrGLInterface.h"
 #include "include/gpu/gl/egl/GrGLMakeEGLInterface.h"
 #include "include/gpu/gl/GrGLTypes.h"
+#include "src/base/SkUTF.h"
 #include "src/gpu/ganesh/gl/GrGLUtil.h"
 
 #if defined(SK_BUILD_FOR_ANDROID)
@@ -103,7 +104,7 @@ extern char **environ;
 
 #define DEFAULT_PIPE_BUFFER 4096
 
-/*
+/**
  * This demo is a not-too-simple application of what to do with Skia it handles:
  *
  *   ****** ********** ****** ********** ****** ********** ****** ********** ****** ***********
@@ -452,6 +453,25 @@ static void handle_sdl_events(ApplicationState *state, GrGLState *glState, SDL_W
                                                              SkIntToScalar(event.button.y)));
                 }
                 break;
+#if 0
+            case SDL_TEXTINPUT: {
+                SkDebugf("sdl: input event %s\n", event.text.text);
+                const char* cPtr = event.text.text;
+                while (1) {
+                    SkUnichar c = SkUTF::NextUTF8(&cPtr, &event.text.text[SDL_TEXTINPUTEVENT_TEXT_SIZE - 1]);
+                    if (c == -1 || c == 0)
+                        break;
+                    SkDebugf("sdl: input event %d\n", c);
+                    if (tsm_vte_handle_keyboard(vte, 0, 0, 0, c)) {
+                        tsm_screen_sb_reset(screen);
+                    }
+                }
+                SkDebugf("term_redraw required\n");
+                state->fRedrawRequired = true;
+                break;
+
+            }
+#endif
             case SDL_KEYDOWN: {
                 SDL_Keycode key = event.key.keysym.sym;
                 // SDL_Scancode scancode = SDL_GetScancodeFromKey(key);
