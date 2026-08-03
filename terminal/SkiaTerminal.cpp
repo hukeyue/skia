@@ -476,6 +476,18 @@ static void handle_sdl_events(ApplicationState *state, GrGLState *glState, SDL_W
                 SDL_Keycode key = event.key.keysym.sym;
                 // SDL_Scancode scancode = SDL_GetScancodeFromKey(key);
                 uint16_t modifier = event.key.keysym.mod;
+                uint16_t tsm_modifier = 0;
+
+                if (KMOD_SHIFT & modifier)
+                    tsm_modifier |= TSM_SHIFT_MASK;
+                if (KMOD_CTRL & modifier)
+                    tsm_modifier |= TSM_CONTROL_MASK;
+                if (KMOD_ALT & modifier)
+                    tsm_modifier |= TSM_ALT_MASK;
+#if 0
+                if (KMOD_GUI & modifier)
+                    tsm_modifier |= TSM_LOGO_MASK;
+#endif
 
                 /* CTRL+q */
                 if (modifier & KMOD_CTRL &&
@@ -562,9 +574,11 @@ static void handle_sdl_events(ApplicationState *state, GrGLState *glState, SDL_W
 #if defined(SK_BUILD_FOR_MAC)
                 if (modifier & KMOD_GUI && key == SDLK_c) {
                     // TBD copy from selection
+                    SkDebugf("sdl: key event copy from selection\n");
                 }
                 if (modifier & KMOD_GUI && key == SDLK_v) {
                     // TBD paste to vte
+                    SkDebugf("sdl: key event paste to vte\n");
                 }
 #endif
                 // https://learn.microsoft.com/en-us/windows/console/console-virtual-terminal-sequences
@@ -600,7 +614,7 @@ static void handle_sdl_events(ApplicationState *state, GrGLState *glState, SDL_W
                     tsm_screen_sb_page_up(screen, 1);
                 } else if (key == SDLK_PAGEDOWN) {
                     tsm_screen_sb_page_down(screen, 1);
-                } else if (tsm_vte_handle_keyboard(vte, key, 0, 0, key)) {
+                } else if (tsm_vte_handle_keyboard(vte, key, 0, tsm_modifier, key)) {
                     // FIXME keysym to utf32
                     SkDebugf("sdl: key event %d\n", key);
                     tsm_screen_sb_reset(screen);
